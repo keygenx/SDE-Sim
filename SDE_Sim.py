@@ -44,15 +44,17 @@ if __name__ == '__main__':
     print(f"CPU Memory: {tensor_memory(ys_cpu_buffer[0])*cpu_buffer_size:.2f} MB")
 
     if task == 'write_data':
-        proc = [mp.Process(target = writer, args = (q1,)) for _ in range(threads)]
+        proc = [mp.Process(target = writer, args = (q1, ys_cpu_buffer,)) for _ in range(threads)]
+        for item in proc: item.start()
     elif task == 'find_density':
         p_dict = mp.Manager().dict()
         proc = [mp.Process(target = calc_density, args = (q1, ys_cpu_buffer, p_dict)), ]
+        for item in proc: item.start()
+        while 'start' not in p_dict: time.sleep(0.1)
     else: 
         proc = [] 
     
-    for item in proc: item.start()
-    while 'start' not in p_dict: time.sleep(0.1)
+    
 
     
     dt     = float(t_end - t_init) / grid_size

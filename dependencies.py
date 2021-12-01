@@ -24,8 +24,7 @@ def calc_density(q, ys_cpu_buffer, return_dict, n_bins = 400):
             bin_centres = (bin_edges[:-1]+bin_edges[1:])/2
             prob_list.append(prob_den)
             bin_list.append(bin_centres)
-        index, _ = q.get()
-        
+        index, _ = q.get()    
     return_dict['p_x'] = torch.stack(prob_list)
     return_dict['x'] = torch.stack(bin_list)
     t2 = time.perf_counter()
@@ -56,19 +55,20 @@ def calc_density_depr(q, return_dict, n_bins = 400):
     print(f"Density Calculator Finished: {t2-t1:.2f}s")
     
 
-def writer(q):
+def writer(q, ys_cpu_buffer):
     import torch
-    print("Writer STarted")
-    obj, f_name = q.get()
-    num = 0
+    import time
+    print("Writer Started")
+    index, f_name = q.get()
+    t1 = time.perf_counter()
     while f_name!='e':
+        obj = ys_cpu_buffer[index]
         torch.save(obj, f_name)
-        del obj
-        obj, f_name = q.get()
-        #print(f"Files Written: {num}",end='\r')
+        index, f_name = q.get()
         num+=1
     q.put(("e","e"))
-    print("Writer finished")
+    t2 = time.perf_counter()
+    print(f"Writer Finished: {t2-t1:.2f}s")
     
 def reader(q, directory):
     import torch
