@@ -54,9 +54,7 @@ if __name__ == '__main__':
     else: 
         proc = [] 
     
-    
 
-    
     dt     = float(t_end - t_init) / grid_size
     p_scale = 50/grid_size
     # Loop
