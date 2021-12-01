@@ -1,0 +1,6 @@
+.vs
+*.npy
+*.sln
+*.pyproj
+.ipynb_checkpoints
+__pycache__/
