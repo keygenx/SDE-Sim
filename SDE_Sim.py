@@ -11,7 +11,7 @@ def dV(x):
 
 if __name__ == '__main__':
     output_directory = 'data/'
-    task = 'find_density' #keep unchanged.
+    task = 'write_data' #keep unchanged.
     threads = 10 #number of writing threads RAM->Harddrive
     cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
     mem_height = 10 #size of datastructure in GPU. Keep unchanged
