@@ -11,7 +11,7 @@ def dV(x):
 
 if __name__ == '__main__':
     output_directory = 'data/'
-    task = 'find_density' #keep unchanged.
+    task = 'write_data' #keep unchanged.
     threads = 10 #number of writing threads RAM->Harddrive
     cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
     mem_height = 10 #size of datastructure in GPU. Keep unchanged
@@ -23,7 +23,7 @@ if __name__ == '__main__':
     # physical parameters
     t_init = 0  #initial time
     t_end  = 10  #final time
-    grid_size  = 100000 # Number of grid points
+    grid_size  = 10000 # Number of grid points
     sigma = 1.0 #scaling factor for noise
     ## Initial Conditions
     y_init = torch.normal(mean=2.0, std=np.sqrt(2.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)

@@ -65,7 +65,6 @@ def writer(q, ys_cpu_buffer):
         obj = ys_cpu_buffer[index]
         torch.save(obj, f_name)
         index, f_name = q.get()
-        num+=1
     q.put(("e","e"))
     t2 = time.perf_counter()
     print(f"Writer Finished: {t2-t1:.2f}s")
