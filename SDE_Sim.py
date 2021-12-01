@@ -109,8 +109,9 @@ if __name__ == '__main__':
                   }
     with open(output_directory + "parameters.txt", 'w') as file:
         json.dump(parameters, file)
-    np.save(output_directory + 'p_x.npy', p_dict['p_x'].numpy())
-    np.save(output_directory + 'x.npy', p_dict['x'].numpy())
+    if task == 'find_density':
+        np.save(output_directory + 'p_x.npy', p_dict['p_x'].numpy())
+        np.save(output_directory + 'x.npy', p_dict['x'].numpy())
 
     t2 = time.perf_counter()
     print(f"Finished: {t2-t1:.2f}s")
