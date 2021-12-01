@@ -2,5 +2,6 @@
 *.npy
 *.sln
 *.pyproj
+*.ds
 .ipynb_checkpoints
 __pycache__/
