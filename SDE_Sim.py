@@ -5,27 +5,9 @@ import torch.multiprocessing as mp
 import json
 from dependencies import *
 
-# Given the following SDE:
-# dY_t = f(Y_t)dt + g(Y_t).dW_t
-# Where W_t is the Weiner process
-#
-# Using Milstein method (Ito Scheme) we have:
-# Y_(t+dt) = Y_t + f(Y_t).dt + g(Y_t).dW_t + 1/2*g(Y_t)*g'(Y_t)((dW_t)^2 - dt)
-
-#Drift term
-def f(Y_t):
-    return -4*(Y_t)**3+4*(Y_t)
-
-#Diffusion term
-def g(Y_t):
-    sigma = 1.0
-    return sigma*Y_t
-
-#Derivative of g(Y_t)
-def dg(Y_t):
-    sigma = 1.0
-    return sigma
-
+#Force
+def dV(x):
+    return 4*(x)**3-4*(x)
 
 if __name__ == '__main__':
     output_directory = 'data/'
@@ -42,6 +24,7 @@ if __name__ == '__main__':
     t_init = 0  #initial time
     t_end  = 10  #final time
     grid_size  = 10000 # Number of grid points
+    sigma = 1.0 #scaling factor for noise
     ## Initial Conditions
     y_init = torch.normal(mean=2.0, std=np.sqrt(2.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
     
@@ -78,10 +61,10 @@ if __name__ == '__main__':
     print("Starting Simulation...")
     for batch in range(num_batches):
         print(f"Simulation Batch: {batch+1}/{num_batches}")
-        buffer_index = 0
-        num_parts = 0
         t1 = time.perf_counter()
         ys[0][:] = y_init
+        buffer_index = 0
+        num_parts = 0
 
         for i in range(1, grid_size):
             
@@ -92,8 +75,8 @@ if __name__ == '__main__':
             ################# Milstein method #################
             y = ys[(i-1)%mem_height]
             torch.normal(out=dW, mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-            ode_term = y + f(y)*dt
-            stochastic_term = g(y)*dW + 0.5*g(y)*dg(y)*(dW**2 - dt)
+            ode_term = y - dV(y) * dt
+            stochastic_term = sigma* dW + 0.5* sigma**2 * (dW**2 - dt)
             torch.add(ode_term, stochastic_term, out = ys[i%mem_height])
             #ys[i%mem_height].copy_(y - dV(y) * dt  + sigma* dW + 0.5* sigma**2 * (dW**2 - dt))
   
@@ -120,7 +103,7 @@ if __name__ == '__main__':
     ################# Saving Parameters #################
     print("Saving Parameters...")
     parameters = {'t_init': t_init, 't_end': t_end, 'grid_size': grid_size,
-                   'dt': dt, 'threads': threads, 'num_par': num_par,
+                   'dt': dt, 'sigma': sigma, 'threads': threads, 'num_par': num_par,
                   'cpu_buffer_size': cpu_buffer_size,  'mem_height': mem_height,
                   'num_batches': num_batches, 'num_parts': num_parts
                   }
