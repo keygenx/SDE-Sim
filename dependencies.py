@@ -14,19 +14,22 @@ def calc_density(q, ys_cpu_buffer, return_dict, n_bins = 400):
     print("Density Calculator Started")
     return_dict['start'] = True
     t1 = time.perf_counter()
-    index, _ = q.get()
+    time_list = []
+    index, t_list = q.get()
     prob_list = []
     bin_list = []
     while index!= 'e':
-        tensor = ys_cpu_buffer[index]
+        time_list.extend(t_list)
+        tensor = ys_cpu_buffer[index][:len(t_list)]
         for item in tensor:
             prob_den, bin_edges = torch.histogram(item, n_bins, density = True)
             bin_centres = (bin_edges[:-1]+bin_edges[1:])/2
             prob_list.append(prob_den)
             bin_list.append(bin_centres)
-        index, _ = q.get()    
-    return_dict['p_x'] = torch.stack(prob_list)
-    return_dict['x'] = torch.stack(bin_list)
+        index, t_list = q.get()    
+    return_dict['p_x'] = torch.stack(prob_list).numpy()
+    return_dict['x'] = torch.stack(bin_list).numpy()
+    return_dict['t'] = torch.tensor(time_list).numpy()
     t2 = time.perf_counter()
     print(f"Density Calculator Finished: {t2-t1:.2f}s")
     

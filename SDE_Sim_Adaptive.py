@@ -28,23 +28,27 @@ def milstein(Y_t, dW_t, dt: float):
 
 
 if __name__ == '__main__':
-    output_directory = 'data_ref/'
+    output_directory = 'data/'
     task = 'find_density' #keep unchanged.
     cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
     mem_height = 10 #size of datastructure in GPU. Minimum: 2
     #array size = mem_height x num_par
     num_par = 1_000_000 #number of parallel simulations
-    num_batches = 1  # number of batches of simulation. set to 1. Functionality incomplete
-    #total number of simulations = num_par*num_batches
+
+    #Error calculation and Adaptive stepping parameters.
+    tolerance = 1e-3
+    fac = 0.8
+    facmin = 0.5
+    facmax = 1.2
 
     # physical parameters
     t_init = 0  #initial time
     t_end  = 10  #final time
-    grid_size  = 10000 # Number of grid points
+    dt_init = 0.001 #initial dt
+    #grid_size  = 10000 # Number of grid points
     ## Initial Conditions
     y_init = torch.normal(mean=2.0, std=np.sqrt(2.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-    
-    assert(grid_size%mem_height==0) #For efficiency reasons keep grid_size a multiple of mem_height 
+     
     assert(mem_height>=2) 
 
     torch.cuda.empty_cache()
@@ -71,41 +75,60 @@ if __name__ == '__main__':
     else: 
         proc = [] 
     
-
-    dt     = float(t_end - t_init) / grid_size
-    p_scale = 50/grid_size
     # Loop
     print("Starting Simulation...")
-    for batch in range(num_batches):
-        print(f"Simulation Batch: {batch+1}/{num_batches}")
-        buffer_index, num_parts = 0, 0
-        t1 = time.perf_counter()
-        ys[0][:] = y_init
-        t_list = [t_init, ]
-        for i in range(1, grid_size):
+    buffer_index, num_parts, i, t = 0, 0, 1, 0
+    accept, reject = 0, 0 
+    t1 = time.perf_counter()
+    ys[0][:] = y_init
+    t_list = [t_init, ]
+    dt = dt_init
+    while(t < t_end):
             
-            #updating progress bar
-            if i%int(grid_size/50) == 0:
-                print("<"+"="*int(i*p_scale)+"_"*int((grid_size-i-1)*p_scale)+">", end='\r')
+        #updating progress bar
+        if i%20 == 0:
+               print("<"+"="*int(t*50/(t_end-t_init))+"_"*int(50*(1-t/(t_end-t_init)))+">"\
+                     + " dt: " + f"{dt:.5f}" + f" acc: {accept} rej: {reject}", end='\r')
         
-            ################# Milstein method #################
-            dW = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-            ys[i%mem_height] = milstein(ys[(i-1)%mem_height], dW, dt)
+        ################# Milstein method #################
+        dW = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
+        ys_0 = ys[i%mem_height] = milstein(ys[(i-1)%mem_height], dW, dt)
 
+            
+        ################# Calculating Error ################
+        #Ilie, Silvana, Kenneth R. Jackson, and Wayne H. Enright. 
+        #"Adaptive time-stepping for the strong numerical solution of stochastic differential equations." 
+        #Numerical Algorithms 68.4 (2015): 791-812.
+        z = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
+        dW_1 = 0.5*dW + 0.5*z
+        dW_2 = 0.5*dW - 0.5*z
+        ys_1 = milstein(ys[(i-1)%mem_height], dW_1, dt/2)
+        ys_2 = milstein(ys_1, dW_2, dt/2)
+        err = float(torch.abs(ys_2 - ys_0).max().to('cpu')/tolerance)
 
-            t_list.append(i*dt)
-            ################# Data Transfer: GPU -> CPU #################
-            if (i+1)%mem_height==0:
-                ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=True)
-                if task == 'write_data' : q1.put((buffer_index, output_directory+f'batch_{batch}_part_{num_parts}.ds'))
-                elif task == 'find_density': q1.put((buffer_index, t_list))
-                buffer_index = (buffer_index+1)%cpu_buffer_size
-                num_parts+=1
-                t_list = []
+        if err>=1:
+            reject+=1
+            dt/=2
+            continue
+
+        accept+=1
+        t+=dt
+        i+=1
+        t_list.append(t)
+        dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
+        ################# Data Transfer: GPU -> CPU #################
+        if (i)%mem_height==0 or t>=t_end:
+            ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=True)
+            if proc != []: q1.put((buffer_index, t_list))
+            buffer_index = (buffer_index+1)%cpu_buffer_size
+            num_parts+=1
+            t_list = []
                 
-    
-        t2 = time.perf_counter()
-        print(f"\nSimulation Time: {t2-t1:.2f}s")
+        
+        
+
+    t2 = time.perf_counter()
+    print(f"\nSimulation Time: {t2-t1:.2f}s")
     
     ################# Cleaning Up #################
     del ys, dW, ys_cpu_buffer
@@ -118,10 +141,10 @@ if __name__ == '__main__':
 
     ################# Saving Parameters #################
     print("Saving Parameters...")
-    parameters = {'t_init': t_init, 't_end': t_end, 'grid_size': grid_size,
-                   'dt': dt, 'num_par': num_par,
+    parameters = {'t_init': t_init, 't_end': t_end, "dt_init": dt_init,
+                  'num_par': num_par, "accepted": accept, "rejected": reject,
                   'cpu_buffer_size': cpu_buffer_size,  'mem_height': mem_height,
-                  'num_batches': num_batches, 'num_parts': num_parts
+                  'tolerance': tolerance
                   }
     with open(output_directory + "parameters.txt", 'w') as file:
         json.dump(parameters, file)
