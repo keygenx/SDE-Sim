@@ -24,16 +24,13 @@ def milstein(Y_t, dW_t, dt: float):
     return ode_term + stochastic_term
 
 
-
-
-
 if __name__ == '__main__':
     output_directory = 'data_ref/'
     task = 'find_density' #keep unchanged.
     cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
     mem_height = 10 #size of datastructure in GPU. Minimum: 2
     #array size = mem_height x num_par
-    num_par = 1_000_000 #number of parallel simulations
+    num_par = 1_000 #number of parallel simulations
     num_batches = 1  # number of batches of simulation. set to 1. Functionality incomplete
     #total number of simulations = num_par*num_batches
 
@@ -48,7 +45,7 @@ if __name__ == '__main__':
     assert(mem_height>=2) 
 
     torch.cuda.empty_cache()
-    q1 = mp.Queue(maxsize=cpu_buffer_size)
+    q1 = mp.Queue(maxsize=cpu_buffer_size-1)
 
     
     print("Creating Large Arrays....")
@@ -67,7 +64,7 @@ if __name__ == '__main__':
         p_dict = mp.Manager().dict()
         proc = [mp.Process(target = calc_density, args = (q1, ys_cpu_buffer, p_dict)), ]
         for item in proc: item.start()
-        while 'start' not in p_dict: time.sleep(0.1)
+        while 'start' not in p_dict: pass
     else: 
         proc = [] 
     

@@ -34,45 +34,40 @@ def local_error(y_new, y_old, dW, dt: float, tolerance: float):
     ys_2 = milstein(ys_1, dW_2, dt/2)
     return float(torch.abs(ys_2 - y_new).max().cpu()/tolerance)
 
-
-
 if __name__ == '__main__':
-    torch.manual_seed(0)
     output_directory = 'data_test/'
     task = 'find_density' #keep unchanged.
-    cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
-    mem_height = 10 #size of datastructure in GPU. Minimum: 2
-    #array size = mem_height x num_par
+    cpu_buffer_size = 100 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
+    mem_height = 10 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
     num_par = 1_000_000 #number of parallel simulations
 
     #Error calculation and Adaptive stepping parameters.
-    tolerance = 1e-3
-    fac = 0.8
-    facmin = 0.2
+    tolerance = 1e-3 #Maximum allowed local error.
+    fac = 0.9
+    facmin = 0.2 
     facmax = 1.3
     dt_init = 0.001 #initial dt
 
     # physical parameters
     t_init = 0  #initial time
-    t_end  = 10  #final time
-    #grid_size  = 10000 # Number of grid points
+    t_end  = 1.0  #final time
     ## Initial Conditions
-    y_init = torch.normal(mean=2.0, std=np.sqrt(8.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
+    y_init = torch.normal(mean=2.0, std=np.sqrt(2.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
      
     assert(mem_height>=2) 
-
+    torch.manual_seed(0)
     torch.cuda.empty_cache()
-    q1 = mp.Queue(maxsize=cpu_buffer_size)
-
     
     print("Creating Large Arrays....")
     ys_cpu_buffer = torch.zeros(cpu_buffer_size, mem_height, num_par, dtype = torch.float32, device = torch.device('cpu'), pin_memory=True)
-    ys_cpu_buffer.share_memory_()
     ys = torch.zeros(mem_height, num_par, dtype = torch.float32, device = torch.device('cuda'))
 
     print(f"GPU Memory: {tensor_memory(ys):.2f} MB")
     print(f"CPU Memory: {tensor_memory(ys_cpu_buffer[0])*cpu_buffer_size:.2f} MB")
 
+    ############### Multiprocess code #################################
+    ys_cpu_buffer.share_memory_() #share memory with subprocess
+    q1 = mp.Queue(maxsize=cpu_buffer_size-1)
     if task == 'write_data':
         threads = min(10, mp.cpu_count()) #number of writing threads RAM->Harddrive
         proc = [mp.Process(target = writer, args = (q1, ys_cpu_buffer,)) for _ in range(threads)]
@@ -85,21 +80,16 @@ if __name__ == '__main__':
     else: 
         proc = [] 
     
-    # Loop
+    ################### Main Loop ###################################
     print("Starting Simulation...")
-    buffer_index, num_parts, i, t = 0, 0, 1, 0
-    accept, reject = 0, 0 
-    t1 = time.perf_counter()
+    buffer_index, num_parts, t, accept, reject, i = 0, 0, 0, 0, 0, 1
+    t_list, t, dt = [t_init, ], t_init, dt_init
     ys[0][:] = y_init
-    t_list = [t_init, ]
-    dt = dt_init
+    jump = []
+
+    t1 = time.perf_counter()
     while(t < t_end):
-            
-        #updating progress bar
-        if i%20 == 0:
-               print("<"+"="*int(t*50/(t_end-t_init))+"_"*int(50*(1-t/(t_end-t_init)))+">"\
-                     + " dt: " + f"{dt:.5f}" + f" acc: {accept} rej: {reject}", end='\r')
-        
+                    
         ################# Milstein method #################
         dW = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
         y_old = ys[(i-1)%mem_height]
@@ -112,24 +102,31 @@ if __name__ == '__main__':
             dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
             continue
 
+        #jump.append(torch.mean(y_new.cpu()).numpy())
+
         accept+=1
         t+=dt
         i+=1
         t_list.append(t)
         dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
         ################# Data Transfer: GPU -> CPU #################
-        if (i)%mem_height==0 or t>=t_end:
-            ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=True)
+        if i%mem_height==0 or t>=t_end:
+            ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=False)
             if proc != []: q1.put((buffer_index, t_list))
+            for item in ys_cpu_buffer[buffer_index][:len(t_list)]:
+                jump.append(torch.mean(item).numpy())
             buffer_index = (buffer_index+1)%cpu_buffer_size
             num_parts+=1
             t_list = []
-                
-        
-        
 
+        #updating progress bar
+        if i%20 == 0 or t>=t_end:
+               print("<"+"="*int(t*50/(t_end-t_init))+"_"*int(50*(1-t/(t_end-t_init)))+">"\
+                     + " dt: " + f"{dt:.5f}" + f" acc: {accept} rej: {reject}"\
+                     + f" buffer: {cpu_buffer_size - q1.qsize()}", end='\r')
+                
     t2 = time.perf_counter()
-    print(f"\nSimulation Time: {t2-t1:.2f}s")
+    print(f"\nSimulation Finished: {t2-t1:.2f}s")
     
     ################# Cleaning Up #################
     del ys, dW, ys_cpu_buffer
@@ -140,9 +137,9 @@ if __name__ == '__main__':
     while not q1.empty(): q1.get(block = False)
     q1.close()
 
-    ################# Saving Parameters #################
+    ################# Saving Data #####################
     print("Saving Parameters...")
-    parameters = {'t_init': t_init, 't_end': t_end, "dt_init": dt_init,
+    parameters = {'t_init': t_init, 't_end': t_end, "dt_init": dt_init, "time_taken": t2-t1,
                   'num_par': num_par, "accepted": accept, "rejected": reject,
                   'cpu_buffer_size': cpu_buffer_size,  'mem_height': mem_height,
                   'tolerance': tolerance, "fac": fac, "facmin": facmin, "facmax": facmax
@@ -153,6 +150,8 @@ if __name__ == '__main__':
         np.save(output_directory + 'p_x.npy', p_dict['p_x'])
         np.save(output_directory + 'x.npy', p_dict['x'])
         np.save(output_directory + 't.npy', p_dict['t'])
+        np.save(output_directory + 'jump.npy', jump )
+        np.save(output_directory + 'jump1.npy', p_dict['mean'])
 
     t2 = time.perf_counter()
-    print(f"Finished: {t2-t1:.2f}s")
+    print(f"Total Time: {t2-t1:.2f}s")
