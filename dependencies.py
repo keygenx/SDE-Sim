@@ -10,9 +10,9 @@ def tensor_memory(obj):
 def hello_world():
     print("Hello World")
    
-def calc_density(q, ys_cpu_buffer, return_dict, n_bins = 400):
+def calc_density(q, ys_cpu_buffer, output_directory, started, n_bins = 400):
     print("Density Calculator Started")
-    return_dict['start'] = True
+    started.value = True
     t1 = time.perf_counter()
     time_list, prob_list, bin_list = [], [], []
     index, t_list = q.get()
@@ -27,9 +27,9 @@ def calc_density(q, ys_cpu_buffer, return_dict, n_bins = 400):
             bin_list.append(bin_centres)    
         index, t_list = q.get()  
 
-    return_dict['p_x'] = torch.stack(prob_list).numpy()
-    return_dict['x'] = torch.stack(bin_list).numpy()
-    return_dict['t'] = torch.tensor(time_list).numpy()
+    np.save(output_directory + 'p_x.npy', torch.stack(prob_list).numpy())
+    np.save(output_directory + 'x.npy', torch.stack(bin_list).numpy())
+    np.save(output_directory + 't.npy', torch.tensor(time_list).numpy())
     t2 = time.perf_counter()
     print(f"Density Calculator Finished: {t2-t1:.2f}s")
        
