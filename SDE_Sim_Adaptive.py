@@ -17,15 +17,15 @@ from dependencies import *
 output_directory = 'data_test/'
 task = 'find_density' #keep unchanged.
 cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
-num_par = 10_000_000 #number of parallel simulations
+num_par = 10_000_0 #number of parallel simulations
 mem_height = 10 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
 
 ####Error calculation and Adaptive stepping parameters.
 adaptive_stepping = True #use adaptive stepping
 dt_init = 0.001 #initial step size
 tolerance = 1e-4 #Maximum allowed local error.
-fac = 0.9 
-facmin = 0.2 
+fac = 0.9
+facmin = 0.2
 facmax = 1.3
 
 ######### physical parameters #############
@@ -65,7 +65,7 @@ if __name__ == '__main__':
    
     assert mem_height>=2, "mem_height < 2"
     assert t_end>t_init, "t_end < t_init"
-    assert facmin<1.0 and facmax>1.0 and fac<1.0, "Adaptive stepping parameter error"
+    assert facmin<1.0 and facmax>1.0 and fac<=1.0, "Adaptive stepping parameter error"
 
     torch.manual_seed(0)
     torch.cuda.empty_cache()
@@ -79,7 +79,7 @@ if __name__ == '__main__':
 
     ############### Multiprocess code #################################
     ys_cpu_buffer.share_memory_() #share memory with subprocess
-    q1 = mp.Queue(maxsize=cpu_buffer_size-1) #queue to transport information to subprocesses
+    q1 = mp.Queue(maxsize=cpu_buffer_size-2) #queue to transport information to subprocesses. -2 prevent overwrite.
 
     if task == 'write_data':
         threads = min(10, mp.cpu_count()) #number of writing threads RAM->Harddrive
@@ -98,7 +98,6 @@ if __name__ == '__main__':
     buffer_index, t, accept, reject, i = 0, 0, 0, 0, 1
     t_list, t, dt = [t_init, ], t_init, dt_init
     ys[0][:] = y_init
-
     t1 = time.perf_counter()
     while(t < t_end):
                     
@@ -122,6 +121,7 @@ if __name__ == '__main__':
         if adaptive_stepping: dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
         ################# Data Transfer: GPU -> CPU #################
         if i%mem_height==0 or t>=t_end:
+            #print(f"{i-1}. Put: {buffer_index}, Get: {started.value}, Q: {q1.qsize()}")
             ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=True)
             if proc != []: q1.put((buffer_index, t_list))
             buffer_index = (buffer_index+1)%cpu_buffer_size
@@ -154,7 +154,6 @@ if __name__ == '__main__':
                   }
     with open(output_directory + "parameters.txt", 'w') as file:
         json.dump(parameters, file)
-
 
     t2 = time.perf_counter()
     print(f"Total Time: {t2-t1:.2f}s")
