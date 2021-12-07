@@ -3,6 +3,7 @@ import time
 import torch
 import torch.multiprocessing as mp
 import json
+import inspect
 from dependencies import *
 
 # Given the following SDE:
@@ -17,27 +18,27 @@ from dependencies import *
 output_directory = 'data_test/'
 task = 'find_density' #keep unchanged.
 cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
-num_par = 10_000_0 #number of parallel simulations
-mem_height = 10 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
+num_par = 10_000_000 #number of parallel simulations
+gpu_buffer_size = 4 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
 
 ####Error calculation and Adaptive stepping parameters.
 adaptive_stepping = True #use adaptive stepping
 dt_init = 0.001 #initial step size
-tolerance = 1e-4 #Maximum allowed local error.
+tolerance = 1e-5 #Maximum allowed local error.
 fac = 0.9
 facmin = 0.2
 facmax = 1.3
 
 ######### physical parameters #############
 t_init = 0.0  #initial time
-t_end  = 1.0  #final time
+t_end  = 4.0  #final time
 
-def f(y): return -4*(y)**3 + 4*(y) #Drift term
-def g(y): return 1.0*y #Diffusion term
-def dg(y): return 1.0  #Derivative of Diffusion term
+def f(y): return -2*(y) #Drift term
+def g(y): return 2**0.5 #Diffusion term
+def dg(y): return 0.0  #Derivative of Diffusion term
 
 ## Initial distribution
-y_init = torch.normal(mean=2.0, std=np.sqrt(2.0), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
+y_init = torch.normal(mean=-(1.2)**3 - (1.2), std=np.sqrt(1/0.2), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
 #########################################################################################################################
 #########################################################################################################################
 
@@ -50,7 +51,6 @@ def milstein(Y_t, dW_t, dt: float):
 
 @torch.jit.script
 def local_error(y_new, y_old, dW, dt: float, tolerance: float):
-    ################# Calculating Error ################
     #Ilie, Silvana, Kenneth R. Jackson, and Wayne H. Enright. 
     #"Adaptive time-stepping for the strong numerical solution of stochastic differential equations." 
     #Numerical Algorithms 68.4 (2015): 791-812.
@@ -63,48 +63,36 @@ def local_error(y_new, y_old, dW, dt: float, tolerance: float):
 
 if __name__ == '__main__':
    
-    assert mem_height>=2, "mem_height < 2"
-    assert t_end>t_init, "t_end < t_init"
+    assert gpu_buffer_size>=2, "Error: gpu_buffer_size < 2"
+    assert t_end>t_init, "Error: t_end < t_init"
     assert facmin<1.0 and facmax>1.0 and fac<=1.0, "Adaptive stepping parameter error"
 
     torch.manual_seed(0)
     torch.cuda.empty_cache()
     
     print("Creating Large Arrays....")
-    ys_cpu_buffer = torch.zeros(cpu_buffer_size, mem_height, num_par, dtype = torch.float32, device = torch.device('cpu'), pin_memory=True)
-    ys = torch.zeros(mem_height, num_par, dtype = torch.float32, device = torch.device('cuda'))
+    #ys_cpu_buffer = torch.zeros(cpu_buffer_size, mem_height, num_par, dtype = torch.float32, device = torch.device('cpu'), pin_memory=True)
+    ys = torch.zeros(gpu_buffer_size, num_par, dtype = torch.float32, device = torch.device('cuda'))
 
     print(f"GPU Memory: {tensor_memory(ys):.2f} MB")
-    print(f"CPU Memory: {tensor_memory(ys_cpu_buffer[0])*cpu_buffer_size:.2f} MB")
+    #print(f"CPU Memory: {tensor_memory(ys_cpu_buffer[0])*cpu_buffer_size:.2f} MB")
 
-    ############### Multiprocess code #################################
-    ys_cpu_buffer.share_memory_() #share memory with subprocess
-    q1 = mp.Queue(maxsize=cpu_buffer_size-2) #queue to transport information to subprocesses. -2 prevent overwrite.
 
-    if task == 'write_data':
-        threads = min(10, mp.cpu_count()) #number of writing threads RAM->Harddrive
-        proc = [mp.Process(target = writer, args = (q1, ys_cpu_buffer, output_directory)) for _ in range(threads)]
-        for item in proc: item.start()
-    elif task == 'find_density':
-        started = mp.Value('i', 0) 
-        proc = [mp.Process(target = calc_density, args = (q1, ys_cpu_buffer, output_directory, started)), ]
-        for item in proc: item.start()
-        while not started.value: pass #waiting for process to properly initialize
-    else: 
-        proc = [] 
-    
     ################### Main Loop ###################################
     print("Starting Simulation...")
-    buffer_index, t, accept, reject, i = 0, 0, 0, 0, 1
-    t_list, t, dt = [t_init, ], t_init, dt_init
-    ys[0][:] = y_init
+    accept, reject, i = 0, 0, 0
+    
+    prob_density, bin_centre = cuda_histogram(y_init, bins=400)
+    prob_densities, bin_centres, t_list = [prob_density], [bin_centre], [t_init]
+    t, dt, ys[0][:] = t_init, dt_init, y_init
+
     t1 = time.perf_counter()
     while(t < t_end):
-                    
+        i+=1      
         ################# Milstein method #################
         dW = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-        y_old = ys[(i-1)%mem_height]
-        y_new = ys[i%mem_height] = milstein(y_old, dW, dt)
+        y_old = ys[(i-1)%gpu_buffer_size]
+        y_new = ys[i%gpu_buffer_size] = milstein(y_old, dW, dt)
 
         if adaptive_stepping:
             err = local_error(y_new, y_old, dW, dt, tolerance)
@@ -113,44 +101,41 @@ if __name__ == '__main__':
                 dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
                 continue ###Discontinuing current iteration
 
-
         accept+=1
         t+=dt
-        i+=1
-        t_list.append(t)
         if adaptive_stepping: dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
-        ################# Data Transfer: GPU -> CPU #################
-        if i%mem_height==0 or t>=t_end:
-            #print(f"{i-1}. Put: {buffer_index}, Get: {started.value}, Q: {q1.qsize()}")
-            ys_cpu_buffer[buffer_index].copy_(ys, non_blocking=True)
-            if proc != []: q1.put((buffer_index, t_list))
-            buffer_index = (buffer_index+1)%cpu_buffer_size
-            t_list = []
+        
+        ################# Probability Density Calculation ######
+        prob_density, bin_centre = cuda_histogram(y_new, bins=400)
+        prob_densities.append(prob_density)
+        bin_centres.append(bin_centre)
+        t_list.append(t)
+        
+        
 
         #updating progress bar
         if i%20 == 0 or t>=t_end:
                print("<"+"="*int(t*50/(t_end-t_init))+"_"*int(50*(1-t/(t_end-t_init)))+">"\
-                     + " dt: " + f"{dt:.5f}" + f" acc: {accept} rej: {reject}"\
-                     + f" buffer: {cpu_buffer_size - q1.qsize()-1}", end='\r')
-                
+                     + " dt: " + f"{dt:.2e}" + f" acc: {accept} rej: {reject}"\
+                     , end='\r')
+        
     t2 = time.perf_counter()
     print(f"\nSimulation Finished: {t2-t1:.2f}s")
     
     ################# Cleaning Up #################
-    del ys, dW, ys_cpu_buffer
-    q1.put(('e','e')) #termination sequence for processes
-    for item in proc:
-        item.join()
-        item.close()
-    while not q1.empty(): q1.get(block = False)
-    q1.close()
+    del ys, dW
 
     ################# Saving Data #####################
+    np.save(output_directory + 'p_x.npy', torch.stack(prob_densities).cpu().numpy())
+    np.save(output_directory + 'x.npy', torch.stack(bin_centres).cpu().numpy())
+    np.save(output_directory + 't.npy', np.array(t_list))
+
     print("Saving Parameters...")
     parameters = {'t_init': t_init, 't_end': t_end, "dt_init": dt_init, "time_taken": t2-t1,
                   'num_par': num_par, "accepted": accept, "rejected": reject,
-                  'cpu_buffer_size': cpu_buffer_size,  'mem_height': mem_height,
-                  'tolerance': tolerance, "fac": fac, "facmin": facmin, "facmax": facmax
+                  'gpu_buffer_size': gpu_buffer_size, 
+                  'tolerance': tolerance, "fac": fac, "facmin": facmin, "facmax": facmax,
+                  'f(Y)': inspect.getsource(f), 'g(y)': inspect.getsource(g), 'dg(Y)': inspect.getsource(dg)
                   }
     with open(output_directory + "parameters.txt", 'w') as file:
         json.dump(parameters, file)

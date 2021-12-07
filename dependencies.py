@@ -9,6 +9,44 @@ def tensor_memory(obj):
 
 def hello_world():
     print("Hello World")
+
+@torch.jit.script
+def cuda_histogram(item, bins: int, density: bool = True):
+
+    min_val = torch.min(item)
+    max_val = torch.max(item)
+    dx = (max_val-min_val)/bins
+
+    bin_edge  = torch.linspace(min_val, max_val, bins+1, device = torch.device('cuda'))
+    bin_centre = (bin_edge[1:]+bin_edge[:-1])/2
+
+    prob = torch.histc(item, bins=bins, max=max_val, min =min_val )
+
+    if density: prob = prob/(item.shape[0]*dx)
+    return prob, bin_centre
+
+def calc_density(q, ys_cpu_buffer, output_directory, started, n_bins = 400):
+    print("Density Calculator Started")
+    started.value = True
+    t1 = time.perf_counter()
+    time_list, prob_list, bin_list = [], [], []
+    index, t_list = q.get()
+    while index!= 'e':
+        time_list.extend(t_list)
+        tensor = ys_cpu_buffer[index][:len(t_list)]
+        
+        for item in tensor:
+            prob_den, bin_edges = torch.histogram(item, n_bins, density = True)
+            bin_centres = (bin_edges[:-1]+bin_edges[1:])/2
+            prob_list.append(prob_den)
+            bin_list.append(bin_centres)    
+        index, t_list = q.get()  
+
+    np.save(output_directory + 'p_x.npy', torch.stack(prob_list).numpy())
+    np.save(output_directory + 'x.npy', torch.stack(bin_list).numpy())
+    np.save(output_directory + 't.npy', np.stack(time_list))
+    t2 = time.perf_counter()
+    print(f"Density Calculator Finished: {t2-t1:.2f}s")
    
 def calc_density(q, ys_cpu_buffer, output_directory, started, n_bins = 400):
     print("Density Calculator Started")
@@ -29,7 +67,7 @@ def calc_density(q, ys_cpu_buffer, output_directory, started, n_bins = 400):
 
     np.save(output_directory + 'p_x.npy', torch.stack(prob_list).numpy())
     np.save(output_directory + 'x.npy', torch.stack(bin_list).numpy())
-    np.save(output_directory + 't.npy', torch.tensor(time_list).numpy())
+    np.save(output_directory + 't.npy', np.stack(time_list))
     t2 = time.perf_counter()
     print(f"Density Calculator Finished: {t2-t1:.2f}s")
        
