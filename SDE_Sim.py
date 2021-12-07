@@ -17,14 +17,13 @@ from dependencies import *
 #########################################################################################################################
 output_directory = 'data_test/'
 task = 'find_density' #keep unchanged.
-cpu_buffer_size = 20 #memory buffer for VRAM->RAM (GPU->CPU) data transfer
-num_par = 10_000_000 #number of parallel simulations
-gpu_buffer_size = 4 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
+num_par = 100_000_000 #number of parallel simulations
+gpu_buffer_size = 3 #size of datastructure in GPU. Minimum: 2. array size = mem_height x num_par
 
 ####Error calculation and Adaptive stepping parameters.
 adaptive_stepping = True #use adaptive stepping
 dt_init = 0.001 #initial step size
-tolerance = 1e-5 #Maximum allowed local error.
+tolerance = 1e-4 #Maximum allowed local error.
 fac = 0.9
 facmin = 0.2
 facmax = 1.3
@@ -71,11 +70,8 @@ if __name__ == '__main__':
     torch.cuda.empty_cache()
     
     print("Creating Large Arrays....")
-    #ys_cpu_buffer = torch.zeros(cpu_buffer_size, mem_height, num_par, dtype = torch.float32, device = torch.device('cpu'), pin_memory=True)
     ys = torch.zeros(gpu_buffer_size, num_par, dtype = torch.float32, device = torch.device('cuda'))
-
     print(f"GPU Memory: {tensor_memory(ys):.2f} MB")
-    #print(f"CPU Memory: {tensor_memory(ys_cpu_buffer[0])*cpu_buffer_size:.2f} MB")
 
 
     ################### Main Loop ###################################
@@ -115,9 +111,10 @@ if __name__ == '__main__':
 
         #updating progress bar
         if i%20 == 0 or t>=t_end:
+               eta = (t_end-t)*(time.perf_counter()-t1)/(t-t_init)
                print("<"+"="*int(t*50/(t_end-t_init))+"_"*int(50*(1-t/(t_end-t_init)))+">"\
                      + " dt: " + f"{dt:.2e}" + f" acc: {accept} rej: {reject}"\
-                     , end='\r')
+                     + f" ETA: {eta:.0f}s", end='\r')
         
     t2 = time.perf_counter()
     print(f"\nSimulation Finished: {t2-t1:.2f}s")
