@@ -10,10 +10,11 @@ from dependencies import *
 
 ############################################ Simulation Parameters ######################################################
 #########################################################################################################################
-output_directory = 'data_test/0.6/'
+output_directory = 'data_test/'
 task = 'find_density' #keep unchanged.
 num_par = 10_000_000 #number of parallel simulations
-gpu_buffer_size = 3 #size of datastructure in GPU. Minimum: 2. array size = gpu_buffer_size x num_par
+dtype = torch.float32
+
 
 ####Error calculation and Adaptive stepping parameters.
 adaptive_stepping = True #use adaptive stepping
@@ -27,11 +28,9 @@ facmax = 1.3
 t_init = 0.0  #initial time
 t_end  = 10.0  #final time
 
-D = 1.0
-gamma = 0.2
 def f_x(y): return -(y)**3 - (y) #Drift term
 def g_x(y): 
-    D_eta = 0.6
+    D_eta = 0.2
     return torch.sqrt(2*D_eta) #Diffusion term
 def dg_x(y): return 0.0  #Derivative of Diffusion term
 
@@ -45,8 +44,8 @@ def dg_f(y): return 0.0  #Derivative of Diffusion term
 
 ## Initial distribution
 x0 = 1.2
-x_init = torch.normal(mean=x0, std=np.sqrt(0.5*10**(-3)), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-f_init = torch.normal(mean=f_x(x0), std=np.sqrt(D/gamma), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
+x_init = torch.normal(mean=x0, std=np.sqrt(0.5*10**(-3)), size=(num_par,), device = torch.device('cuda'), dtype=dtype)
+f_init = torch.normal(mean=0, std=np.sqrt(5.0), size=(num_par,), device = torch.device('cuda'), dtype=dtype)
 #########################################################################################################################
 #########################################################################################################################
 
@@ -65,10 +64,10 @@ def milstein_f(f_old, d_xi, dt: float):
 
 @torch.jit.script
 def local_error(x_new, x_old, f_new, f_old, d_eta, d_xi, dt: float, tolerance: float):
-    z = torch.normal(mean=0.0, std=torch.sqrt(dt), size=d_eta.shape, device = torch.device('cuda'), dtype=torch.float32)
+    z = torch.normal(mean=0.0, std=torch.sqrt(dt), size=d_eta.shape, device = torch.device('cuda'), dtype=d_eta.dtype)
     d_eta_1 = 0.5*d_eta + 0.5*z
     d_eta_2 = 0.5*d_eta - 0.5*z
-    z = torch.normal(mean=0.0, std=torch.sqrt(dt), size=d_xi.shape, device = torch.device('cuda'), dtype=torch.float32)
+    z = torch.normal(mean=0.0, std=torch.sqrt(dt), size=d_xi.shape, device = torch.device('cuda'), dtype=d_xi.dtype)
     d_xi_1 = 0.5*d_xi + 0.5*z
     d_xi_2 = 0.5*d_xi - 0.5*z 
 
@@ -81,18 +80,11 @@ def local_error(x_new, x_old, f_new, f_old, d_eta, d_xi, dt: float, tolerance: f
 
 if __name__ == '__main__':
    
-    assert gpu_buffer_size>=2, "Error: gpu_buffer_size < 2"
     assert t_end>t_init, "Error: t_end < t_init"
     assert facmin<1.0 and facmax>1.0 and fac<=1.0, "Adaptive stepping parameter error"
 
     torch.manual_seed(0)
     torch.cuda.empty_cache()
-    
-    print("Creating Large Arrays....")
-    xs = torch.zeros(gpu_buffer_size, num_par, dtype = torch.float32, device = torch.device('cuda'))
-    fs = torch.zeros(gpu_buffer_size, num_par, dtype = torch.float32, device = torch.device('cuda'))
-    print(f"GPU Memory: {tensor_memory(xs)*2:.2f} MB")
-   
     
     ################### Main Loop ###################################
     print("Starting Simulation...")
@@ -102,20 +94,19 @@ if __name__ == '__main__':
     prob_densities, bin_centres, t_list = [prob_density], [bin_centre], [t_init]
     t, dt = t_init, dt_init
 
-    xs[0][:] = x_init
-    fs[0][:] = f_init
+    x = x_init
+    f = f_init
 
     t1 = time.perf_counter()
     while(t < t_end):
         i+=1  
         
         ################# Milstein method #################
-        d_xi = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-        d_eta = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=torch.float32)
-        f = fs[(i-1)%gpu_buffer_size]
-        x = xs[(i-1)%gpu_buffer_size]
-        f_new = fs[i%gpu_buffer_size] = milstein_f(f, d_xi, dt)
-        x_new = xs[i%gpu_buffer_size] = milstein_x(x, d_eta, f, dt)
+        d_xi = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=dtype)
+        d_eta = torch.normal(mean=0.0, std=np.sqrt(dt), size=(num_par,), device = torch.device('cuda'), dtype=dtype)
+
+        f_new = milstein_f(f, d_xi, dt)
+        x_new = milstein_x(x, d_eta, f, dt)
 
         if adaptive_stepping:
             err = local_error(x_new, x, f_new, f, d_eta, d_xi, dt, tolerance)
@@ -124,8 +115,9 @@ if __name__ == '__main__':
                 dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
                 continue ###Discontinuing current iteration
 
-
-        accept+=1
+        x = x_new
+        f = f_new
+        accept += 1
         t+=dt
         if adaptive_stepping: dt = dt*np.clip(np.power(fac/err, 1/(1.5)), facmin, facmax)
         
@@ -145,8 +137,6 @@ if __name__ == '__main__':
     t2 = time.perf_counter()
     print(f"\nSimulation Finished: {t2-t1:.2f}s")
     
-    ################# Cleaning Up #################
-    del xs, fs, d_eta, d_xi
 
     ################# Saving Data #####################
     np.save(output_directory + 'p_x.npy', torch.stack(prob_densities).cpu().numpy())
@@ -156,7 +146,6 @@ if __name__ == '__main__':
     print("Saving Parameters...")
     parameters = {'t_init': t_init, 't_end': t_end, "dt_init": dt_init, "time_taken": t2-t1,
                   'num_par': num_par, "accepted": accept, "rejected": reject,
-                  'gpu_buffer_size': gpu_buffer_size,
                   'tolerance': tolerance, "fac": fac, "facmin": facmin, "facmax": facmax,
                   'f_f()': inspect.getsource(f_f), 'g_f()': inspect.getsource(g_f), 'dg_f()': inspect.getsource(dg_f),
                   'f_x()': inspect.getsource(f_x), 'g_x()': inspect.getsource(g_x), 'dg_x()': inspect.getsource(dg_x),
