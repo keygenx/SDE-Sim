@@ -1,6 +1,6 @@
 # SDE-Sim
-CUDA parallel simulation of SDE
+CUDA parallel simulation of autonomous stochastic differential equations (SDE)
 
-Open SDE_Sim.py <p>
-Change Parameters <p>
-RUN
+For a quick start guide open the notebook Tutorial.ipynb.
+
+Work under progress.
