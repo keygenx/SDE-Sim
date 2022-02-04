@@ -6,6 +6,13 @@ import os
 import inspect
 import pickle
 
+def histc(y, bins:int, max, min):
+    #for future.
+    if len(y.shape)==1:
+        return torch.histc(y, bins=bins, max=max, min=min)
+    else:
+        return torch.stack([torch.histc(y[i], bins=bins, max=max[i], min=min[i]) for i in range(y.shape[0])])
+
 class SDE:
 
     """A class for simulating Autonomous SDEs using the Ito Scheme.
@@ -70,8 +77,12 @@ class SDE:
         self._mean_shift_threshold = torch.tensor(0.2, dtype = self.dtype, device = self.device)
         self._functions_compiled = False
         self._err_scale_exp = 1/(1+self._order_of_conv)
-        self._velocity_avg_dt = 1e-8
+        self._velocity_avg_dt = torch.tensor(1e-8, dtype = self.dtype, device = self.device)
+        self._shape = (num_par, )
         self.fn_def_strings = ['f', 'g', 'df', 'dg', 'd2f', 'd2g']
+
+
+        self.set_stats()
     
     @property
     def tolerance(self):
@@ -84,17 +95,18 @@ class SDE:
             self.set_functions(*self.fn)
             
     def _velocity(self, y_new):
-        xi = torch.normal(mean=0.0, std=self._velocity_avg_dt**(-0.5), size=(self.num_par,), device = self.device, dtype=self.dtype)
-        return self.fn[0](y_new) + self.fn[1](y_new)*xi    
-    
+        dt = self._velocity_avg_dt
+        xi = torch.normal(mean=0.0, std=1.0, size=self._shape, device = self.device, dtype=self.dtype)
+        return (self._step_forward_uncompiled(y_new, xi*dt**(-0.5), dt)-y_new)/dt
+
     @property
     def velocity_avg_dt(self):
-        return self._velocity_avg_dt
+        return float(self._velocity_avg_dt)
     
     @velocity_avg_dt.setter
     def velocity_avg_dt(self, new_val):
-        self._velocity_avg_dt = new_val
-        if self._functions_compiled == True:
+        self._velocity_avg_dt = torch.tensor(new_val, dtype = self.dtype, device=self.device)
+        if self._functions_compiled:
             self.velocity = torch.jit.trace(self._velocity, (self.y_init, ), check_trace = False)
     
     @staticmethod
@@ -124,8 +136,8 @@ class SDE:
         stochastic_term = g*dW
         return ode_term + stochastic_term
     
-    @staticmethod
-    def _taylor_15(y, dw, dt, fn):
+    
+    def _taylor_15(self, y, dw, dt, fn):
         ##Section 10.4, Numerical Solution of Stochastic Differential Equations - Peter E. Kloeden Eckhard Platen (1999)
         #Following expressions are for multi dimensional case
         if callable(fn[0]): f = fn[0](y)
@@ -136,7 +148,7 @@ class SDE:
         df, dg, d2f, d2g = fn[2], fn[3], fn[4], fn[5]
         
         if df != None or dg != None:
-            temp = torch.normal(mean=0.0, std=1.0, size=dw.shape, device = dw.device, dtype=dw.dtype)/3**0.5
+            temp = torch.normal(mean=0.0, std=1.0, size=dw.shape, device = self.device, dtype=self.dtype)/3**0.5
             dz = 0.5*dt**(1.5)*(dw/(dt**0.5) + temp)
         a = f
         b = g
@@ -164,46 +176,53 @@ class SDE:
             z = torch.normal(mean=0.0, std=1.0, size=dW.shape, device = self.device, dtype=self.dtype)*dt**0.5
             dW_1 = 0.5*dW + 0.5*z
             dW_2 = 0.5*dW - 0.5*z
-            ys_1 = self._step_forward_uncompiled(y_old, dW_1, dt/2, self.fn)
-            ys_2 = self._step_forward_uncompiled(ys_1, dW_2, dt/2, self.fn)
+            ys_1 = self._step_forward_uncompiled(y_old, dW_1, dt/2)
+            ys_2 = self._step_forward_uncompiled(ys_1, dW_2, dt/2)
             return (torch.abs(ys_2 - y_new).max()/self._tolerance)
         
     def set_stats(self, **kwargs):
         """This method is used to set the statistics thate need to be measured during the simulation.
-            The Following arguments are possible:
-            > density = True/False, Calculate probability density 
-            > density_v = True/False, Calculate probability density of velocity 
-            > mean = True/False, Calculate mean 
-            > mean_v = True/False, Calculate mean of velocity 
-            > std = True/False, Calculate std 
-            > std_v = True/False, Calculate std of velocity 
-            > entropy = True/False, Calculate entropy 
-            > entropy_v = True/False, Calculate entropy of velocity 
-            > info_rate = True/False, Calculate information rate
-            > info_rate_v = True/False, Calculate information rate of velocity  """
+            The data will be stored in a dictionary with keys mentioned below.
         
-        all_stats = ['density', 'density_v', 'info_rate', 'mean', 'std', 'mean_v', 'std_v', 'entropy', 'entropy_v', 'info_rate_v']
+            The Following arguments are possible:
+            > density = True/False, Calculate probability density. Keys: p(y,t), y, t
+            > density_v = True/False, Calculate probability density of velocity. Keys: p(v,t), v, t
+            > mean = True/False, Calculate mean. Keys: mean(t), t
+            > mean_v = True/False, Calculate mean of velocity. Keys: mean_v(t), t
+            > std = True/False, Calculate std. Keys: std(t), t
+            > std_v = True/False, Calculate std of velocity. Keys: std_v(t), t
+            > entropy = True/False, Calculate entropy. Keys: entropy(t), t
+            > entropy_v = True/False, Calculate entropy of velocity. Keys: entropy_v(t), t
+            > info_rate = True/False, Calculate information rate. Keys: info_rate(t*), t*
+            > info_rate_v = True/False, Calculate information rate of velocity. Keys: info_rate(t#), t#
+            > position = True/False, store the trajectory of the SDE. Keys: y(t), t
+
+            Note that if large number of parallel simulations are run position can quickly fill up the RAM.
+            """
+        
+        all_stats = ['position', 'density', 'density_v', 'info_rate', 'mean', 'std', 'mean_v', 'std_v', 'entropy', 'entropy_v', 'info_rate_v']
         
         for i in kwargs.keys():
             if i not in all_stats: raise Exception(f"{i} argument not recognized.")
-                
-        self.calc_density = kwargs.get('density', False)
-        self.calc_density_v = kwargs.get('density_v', False)
-        self.calc_info_rate = kwargs.get('info_rate', False)
-        self.calc_mean = kwargs.get('mean', False)
-        self.calc_std = kwargs.get('std', False)
-        self.calc_mean_v = kwargs.get('mean_v', False)
-        self.calc_std_v = kwargs.get('std_v', False)
-        self.calc_entropy = kwargs.get('entropy', False)
-        self.calc_entropy_v = kwargs.get('entropy_v', False)
-        self.calc_info_rate_v = kwargs.get('info_rate_v', False)
         
-        if self.calc_mean_v or self.calc_std_v or self.calc_entropy_v or self.calc_density_v or self.calc_info_rate_v:
-            self.compute_velocity = True
+        self._calc_position = kwargs.get('position', False)
+        self._calc_density = kwargs.get('density', False)
+        self._calc_density_v = kwargs.get('density_v', False)
+        self._calc_info_rate = kwargs.get('info_rate', False)
+        self._calc_mean = kwargs.get('mean', False)
+        self._calc_std = kwargs.get('std', False)
+        self._calc_mean_v = kwargs.get('mean_v', False)
+        self._calc_std_v = kwargs.get('std_v', False)
+        self._calc_entropy = kwargs.get('entropy', False)
+        self._calc_entropy_v = kwargs.get('entropy_v', False)
+        self._calc_info_rate_v = kwargs.get('info_rate_v', False)
+        
+        if self._calc_mean_v or self._calc_std_v or self._calc_entropy_v or self._calc_density_v or self._calc_info_rate_v:
+            self._compute_velocity = True
             print("Warning: Stochastic processes doesn't have a well-defined instantaneous velocity. ", end="")
             print("Therefore a finite time limit is considered. Change value of 'velocity_avg_dt' attribute to change the finite time interval")
         else:
-            self.compute_velocity = False
+            self._compute_velocity = False
     
     def set_functions(self, f, g, df = None, dg = None, d2f = None, d2g = None):
         """This method is used to set the drift and diffusion functions in an SDE.
@@ -213,6 +232,8 @@ class SDE:
             > dg: function, 1st derivative of diffusion function
             > d2f: function, 2nd derivative of drift function
             > d2g: function, 2nd derivative of diffusion function
+
+            Currently only support functions containing basic operators and functions from python 'math' module.
 
             The derivative arguments are optional and will be consider as 0 if not provided.
             'euler_maruyama' method requires f and g.
@@ -224,19 +245,19 @@ class SDE:
         self.fn = [f, g, df, dg, d2f, d2g]
         
         if self.method == 'euler_maruyama':
-            self._step_forward_uncompiled = self._euler_maruyama
+            self._step_forward_uncompiled = lambda a,b,c: self._euler_maruyama(a,b,c, self.fn)
         elif self.method == 'milstein' and self._functions_compiled == False:
             if dg == None: print("Warning: Assuming derivative of diffusion is 0 throughout the domain")
-            self._step_forward_uncompiled = self._milstein
+            self._step_forward_uncompiled = lambda a,b,c: self._milstein(a,b,c, self.fn)
         elif self.method == 'taylor_15':
             if self._functions_compiled == False:
                 if dg == None: print("Warning: Assuming derivative of diffusion is 0 throughout the domain")
                 if d2g == None: print("Warning: Assuming 2nd derivative of diffusion is 0 throughout the domain")
                 if df == None: print("Warning: Assuming derivative of drift is 0 throughout the domain")
                 if d2f == None: print("Warning: Assuming 2nd derivative of drift is 0 throughout the domain")
-            self._step_forward_uncompiled = self._taylor_15
-            
-        self.step_forward = torch.jit.trace(lambda a,b,c: self._step_forward_uncompiled(a,b,c,self.fn), (self.y_init, self.y_init, self.dt_init), check_trace=False)
+            self._step_forward_uncompiled = lambda a,b,c: self._taylor_15(a,b,c, self.fn)
+
+        self.step_forward = torch.jit.trace(self._step_forward_uncompiled, (self.y_init, self.y_init, self.dt_init), check_trace=False)
         
         if self.adaptive_stepping: self.step_error = torch.jit.trace(self._local_error, (self.y_init, self.y_init, self.y_init, self.dt_init), check_trace=False)
         self.velocity = torch.jit.trace(self._velocity, (self.y_init, ), check_trace = False)
@@ -245,75 +266,67 @@ class SDE:
         
     @torch.jit.script
     def info_rate(y_new, y_old, dt, bins: int = 0, gauss_estimate : bool = True):
-        num_par = y_new.shape[0]
-        min_val_new = torch.min(y_new)
-        min_val_old = torch.min(y_old)
-        max_val_new = torch.max(y_new)
-        max_val_old = torch.max(y_old)
+        """Compute information rate for 1D distribution from tensor of samples. If multi-d
+        """
+        num_par = y_new.shape[-1]
+        if bins==0: bins = int(1.4*2.59*num_par**0.33333)
+    
+        min_val_new = torch.min(y_new, dim=-1)[0]
+        min_val_old = torch.min(y_old, dim=-1)[0]
+        max_val_new = torch.max(y_new, dim=-1)[0]
+        max_val_old = torch.max(y_old, dim=-1)[0]
+        min_val = torch.min(min_val_old,min_val_new)
+        max_val = torch.max(max_val_old,max_val_new)
 
-        if bins==0:
-                bins = int(2.59*num_par**0.33333)
+        prob_old = histc(y_old, bins=bins, max=max_val, min=min_val )/num_par
+        prob_new = histc(y_new, bins=bins, max=max_val, min=min_val)/num_par
+        ir_approx = 4*((prob_old**0.5-prob_new**0.5)**2).sum(dim=-1)
 
-        if min_val_new > max_val_old or min_val_old > max_val_new:
-            prob_old = torch.histc(y_old, bins=bins, max=max_val_old, min=min_val_old )/num_par
-            prob_new = torch.histc(y_new, bins=bins, max=max_val_new, min=min_val_new)/num_par
-            ir_approx = (prob_old).sum()+prob_new.sum()
-        else:
-            bins = int(bins*1.5)
-            min_val = torch.min(min_val_old,min_val_new)
-            max_val = torch.max(max_val_old,max_val_new)
-            prob_old = torch.histc(y_old, bins=bins, max=max_val, min=min_val )/num_par
-            prob_new = torch.histc(y_new, bins=bins, max=max_val, min=min_val)/num_par
-            ir_approx = 4*((prob_old**0.5-prob_new**0.5)**2).sum()
-        
-        index = (prob_new!=0)*(prob_old!=0)
-        p1 = prob_new[index]
-        p2 = prob_old[index]
-        kl_symm = (((p1-p2)*(torch.log(p1)-torch.log(p2))).sum())
-            
+        index = (prob_new-prob_old)*(prob_new!=0)*(prob_old!=0) #removing zeros with nansum in next line
+        kl_symm = (index*(torch.log(prob_new)-torch.log(prob_old))).nansum(dim=-1)
+    
         if gauss_estimate:
-            var_new = torch.var(y_new, unbiased = True)
-            var_old = torch.var(y_old, unbiased = True)
-            mean_new = torch.mean(y_new)
-            mean_old = torch.mean(y_old)
+            var_new = torch.var(y_new, unbiased = True, dim=-1)
+            var_old = torch.var(y_old, unbiased = True, dim=-1)
+            mean_new = torch.mean(y_new, dim=-1)
+            mean_old = torch.mean(y_old, dim=-1)
             info_rate_normal = (var_new+(mean_new-mean_old)**2)/(var_old*2)+(var_old+(mean_new-mean_old)**2)/(var_new*2)-1
-            return torch.stack((ir_approx, kl_symm, info_rate_normal))**0.5/dt
+            return torch.stack((ir_approx, kl_symm, info_rate_normal), dim=-1)**0.5/dt
         else:
-            return torch.stack((ir_approx, kl_symm))**0.5/dt
-        
-    @torch.jit.script
-    def histogram(item, bins: int = 0, density: bool = True):
-        min_val = torch.min(item)
-        max_val = torch.max(item)
-        
-        if bins==0:
-                bins = int(2.59*item.shape[0]**0.33333)
-                
-        dx = (max_val-min_val)/bins
-        bin_edge  = torch.linspace(min_val, max_val, bins+1, device = item.device, dtype = item.dtype)
-        bin_centre = (bin_edge[1:]+bin_edge[:-1])/2
+            return torch.stack((ir_approx, kl_symm), dim=-1)**0.5/dt
 
-        prob = torch.histc(item, bins=bins, max=max_val, min =min_val)
-        if density: 
-            if dx == 0: prob[:] = float('inf')
-            else: prob = prob/(item.shape[0]*dx)
-        return prob, bin_centre
+    @torch.jit.script
+    def histogram(item, bins: int = 0, density: bool = False):
+        min_val = torch.min(item, dim=-1)[0]
+        max_val = torch.max(item, dim=-1)[0]
+        
+        if bins==0: bins = int(2.59*item.shape[-1]**0.33333)
+        prob = histc(item, bins=bins, max=max_val, min =min_val)
+        
+        dx = (max_val-min_val)/bins
+        if len(item.shape)>1:
+            bin_edge  = min_val[:,None] + torch.arange(bins+1, device=min_val.device, dtype=min_val.dtype)[None,:]*dx[:,None]
+            bin_centre = (bin_edge[:,1:]+bin_edge[:,:-1])/2
+            if density: prob = torch.nan_to_num(prob/(item.shape[-1]*dx[:, None]), nan=0.0, posinf=float('inf'))
+            return prob, bin_centre
+        else:
+            bin_edge  = min_val + torch.arange(bins+1, device=min_val.device, dtype=min_val.dtype)*dx
+            bin_centre = (bin_edge[1:]+bin_edge[:-1])/2
+            if density: prob = torch.nan_to_num(prob/(item.shape[-1]*dx), nan=0.0, posinf=float('inf'))
+            return prob, bin_centre
     
     @torch.jit.script
     def entropy(item, bins: int = 0):
-        min_val = torch.min(item)
-        max_val = torch.max(item)
-        
-        if min_val == max_val: return min_val*0
-        
+        min_val = torch.min(item, dim=-1)[0]
+        max_val = torch.max(item, dim=-1)[0]
+
         if bins==0:
-                bins = int(2.59*item.shape[0]**0.33333)
-                
+                bins = int(2.59*item.shape[-1]**0.33333)
+
         dx = (max_val-min_val)/bins
-        
-        prob = torch.histc(item, bins=bins, max=max_val, min =min_val)/item.shape[0]
+        prob = histc(item, bins=bins, max=max_val, min =min_val)/item.shape[-1]
         index = prob!=0
-        return -torch.sum((prob*torch.log(prob))[index]) + torch.log(dx)
+        return -torch.nansum((prob*torch.log(prob)), dim=-1) + torch.log(dx)
 
     def _compute_info_rate_v(self, v_new, y, dt):
         if self.dt_elapsed_v == 0:
@@ -321,13 +334,13 @@ class SDE:
             self.t_old_v = self.t
             self.dt_old_v = dt
             self.v_old = v
-            self.v_mean = self.data['mean_v(t)'][-2] if self.calc_mean_v else torch.mean(v)
-            self.v_std = self.data['std_v(t)'][-2] if self.calc_std_v else torch.std(v, unbiased = True)
+            self.v_mean = self.data['mean_v(t)'][-2] if self._calc_mean_v else torch.mean(v)
+            self.v_std = self.data['std_v(t)'][-2] if self._calc_std_v else torch.std(v, unbiased = True)
             self.dt_interp_v = self._mean_shift_threshold*self.v_std/torch.abs((self.fn[0](y)*self.fn[2](y)).mean())
 
         self.dt_elapsed_v += dt   
 
-        new_std = self.data['std_v(t)'][-1] if self.calc_std_v else torch.std(v_new, unbiased = True)
+        new_std = self.data['std_v(t)'][-1] if self._calc_std_v else torch.std(v_new, unbiased = True)
 
         if self.dt_interp_v<self.dt_old_v:
             xi = torch.normal(mean=0.0, std=self.dt_interp_v**0.5, size=(self.num_par,), device = self.device, dtype=self.dtype)
@@ -380,13 +393,13 @@ class SDE:
             self.y_old = y
             self.y_next = y_new
             self.dt_old = dt
-            self.y_mean = self.data['mean(t)'][-2] if self.calc_mean else torch.mean(y)
-            self.y_std = self.data['std(t)'][-2] if self.calc_std else torch.std(y, unbiased = True)
+            self.y_mean = self.data['mean(t)'][-2] if self._calc_mean else torch.mean(y)
+            self.y_std = self.data['std(t)'][-2] if self._calc_std else torch.std(y, unbiased = True)
             self.dt_interp = self._mean_shift_threshold*self.y_std/torch.abs(self.fn[0](y).mean())
 
         self.dt_elapsed+=dt   
 
-        new_std = self.data['std(t)'][-1] if self.calc_std else torch.std(y_new, unbiased = True)
+        new_std = self.data['std(t)'][-1] if self._calc_std else torch.std(y_new, unbiased = True)
         
         if self.dt_interp<self.dt_old: #questionable step
             dW_interp = torch.normal(mean=0.0, std=torch.sqrt(self.dt_interp), size=(self.num_par,), device = self.device, dtype=self.dtype)
@@ -432,39 +445,40 @@ class SDE:
             self.dt_elapsed *= 0
     
     def _collect_stats(self, y_new, y, dt, init=False):
-        if self.compute_velocity:
+        if self._compute_velocity:
             xi = torch.normal(mean=0.0, std=1e-4, size=(self.num_par,), device = self.device, dtype=self.dtype)
             v_new = self.velocity(y_new)
-            
-        if self.calc_mean: self.data['mean(t)'].append(torch.mean(y_new, dim=-1))
-        if self.calc_std: self.data['std(t)'].append(torch.std(y_new, unbiased = True, dim=-1))
-        if self.calc_mean_v: self.data['mean_v(t)'].append(torch.mean(v_new, dim=-1))
-        if self.calc_std_v: self.data['std_v(t)'].append(torch.std(v_new, unbiased = True, dim=-1)) 
+        
+        if self._calc_position: self.data['y(t)'].append(y_new.to('cpu'))
+        if self._calc_mean: self.data['mean(t)'].append(torch.mean(y_new, dim=-1))
+        if self._calc_std: self.data['std(t)'].append(torch.std(y_new, unbiased = True, dim=-1))
+        if self._calc_mean_v: self.data['mean_v(t)'].append(torch.mean(v_new, dim=-1))
+        if self._calc_std_v: self.data['std_v(t)'].append(torch.std(v_new, unbiased = True, dim=-1)) 
         ##std and mean should be always above other stats
-        if self.calc_entropy: self.data['entropy(t)'].append(self.entropy(y_new))
-        if self.calc_entropy_v: self.data['entropy_v(t)'].append(self.entropy(v_new))
+        if self._calc_entropy: self.data['entropy(t)'].append(self.entropy(y_new))
+        if self._calc_entropy_v: self.data['entropy_v(t)'].append(self.entropy(v_new))
             
-        if self.calc_density: 
-            prob_density, bin_centre = self.histogram(y_new)
+        if self._calc_density: 
+            prob_density, bin_centre = self.histogram(y_new, density=True)
             self.data['p(y,t)'].append(prob_density.to('cpu'))
-            self.data['y(t)'].append(bin_centre.to('cpu'))
-        if self.calc_density_v: 
-            prob_density, bin_centre = self.histogram(v_new)
+            self.data['y'].append(bin_centre.to('cpu'))
+        if self._calc_density_v: 
+            prob_density, bin_centre = self.histogram(v_new, density=True)
             self.data['p(v,t)'].append(prob_density.to('cpu')) #send to cpu. Can get too large for GPU
-            self.data['v(t)'].append(bin_centre.to('cpu'))
+            self.data['v'].append(bin_centre.to('cpu'))
             
         if init: 
             self.data['t'].append(self.t)
-            if self.calc_info_rate:
+            if self._calc_info_rate:
                 self.dt_elapsed = torch.tensor(0.0, dtype = self.dtype, device = self.device)
                 self.dt_elapsed_thresh = torch.tensor(1e4, dtype = self.dtype, device = self.device)
-            if self.calc_info_rate_v:
+            if self._calc_info_rate_v:
                 self.dt_elapsed_v = torch.tensor(0.0, dtype = self.dtype, device = self.device)
                 self.dt_elapsed_thresh_v = torch.tensor(1e4, dtype = self.dtype, device = self.device)
             return
         
-        if self.calc_info_rate: self._compute_info_rate(y_new, y, dt)  
-        if self.calc_info_rate_v: self._compute_info_rate_v(v_new, y, dt)
+        if self._calc_info_rate: self._compute_info_rate(y_new, y, dt)  
+        if self._calc_info_rate_v: self._compute_info_rate_v(v_new, y, dt)
                 
         self.data['t'].append(self.t + dt)
             
