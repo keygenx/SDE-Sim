@@ -3,5 +3,11 @@
 *.sln
 *.pyproj
 *.ds
+*.pyperf
+*.dic
+*.bak
+workspace.ipynb
 .ipynb_checkpoints
 __pycache__/
+deleted/
+cpp_test/
