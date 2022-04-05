@@ -67,9 +67,10 @@ class SDE:
         self.adaptive_stepping = kwargs.get('adaptive_stepping', True) #use adaptive stepping
         self.dt_init = torch.tensor(kwargs.get('dt_init', 1e-10), dtype = self.dtype, device = self.device)#initial step size
         self._tolerance = torch.tensor(kwargs.get('tolerance', 1e-3), dtype = self.dtype, device = self.device) #Maximum allowed local error.
-        self.fac = torch.tensor(0.9, dtype = self.dtype, device = self.device)
-        self.facmin = torch.tensor(0.2, dtype = self.dtype, device = self.device)
-        self.facmax = torch.tensor(1.3, dtype = self.dtype, device = self.device)
+        self._fac = torch.tensor(kwargs.get('fac', 0.9), dtype = self.dtype, device = self.device)
+        self._facmin = torch.tensor(kwargs.get('facmin', 0.2), dtype = self.dtype, device = self.device)
+        self._facmax = torch.tensor(kwargs.get('facmax', 1.3), dtype = self.dtype, device = self.device)
+        
         
         ####Internal variables####################
         self.debug = False
@@ -87,17 +88,42 @@ class SDE:
     @property
     def tolerance(self):
         return self._tolerance
+    @property
+    def fac(self):
+        return self._fac
+    @property
+    def facmin(self):
+        return self._facmin
+    @property
+    def facmax(self):
+        return self._facmax   
+    
+    
     
     @tolerance.setter
     def tolerance(self, new_val):
         self._tolerance = torch.tensor(new_val, dtype = self.dtype, device = self.device) 
+        
+        #recompile step error functions.
         if self._functions_compiled == True:
             self.set_functions(*self.fn)
             
-    def _velocity(self, y_new):
+    @fac.setter
+    def fac(self, new_val):
+        self._fac = torch.tensor(new_val, dtype = self.dtype, device = self.device) 
+            
+    @facmin.setter
+    def facmin(self, new_val):
+        self._facmin = torch.tensor(new_val, dtype = self.dtype, device = self.device) 
+    
+    @facmax.setter
+    def facmax(self, new_val):
+        self._facmax = torch.tensor(new_val, dtype = self.dtype, device = self.device) 
+    
+    def _velocity(self, y, t):
         dt = self._velocity_avg_dt
-        xi = torch.normal(mean=0.0, std=1.0, size=self._shape, device = self.device, dtype=self.dtype)
-        return (self._step_forward_uncompiled(y_new, xi*dt**(-0.5), dt)-y_new)/dt
+        xi = torch.normal(mean=0.0, std=1.0, size=y.shape, device = y.device, dtype=y.dtype)
+        return (self._step_forward_uncompiled(y, xi*dt**(-0.5), dt, t)-y)/dt
 
     @property
     def velocity_avg_dt(self):
@@ -107,7 +133,7 @@ class SDE:
     def velocity_avg_dt(self, new_val):
         self._velocity_avg_dt = torch.tensor(new_val, dtype = self.dtype, device=self.device)
         if self._functions_compiled:
-            self.velocity = torch.jit.trace(self._velocity, (self.y_init, ), check_trace = False)
+            self.velocity = torch.jit.trace(self._velocity, (self.y_init, self.dt_init), check_trace = False)
     
     @staticmethod
     def _milstein(Y, dW, dt, fn):
@@ -169,15 +195,15 @@ class SDE:
         
         return terms
     
-    def _local_error(self, y_new, y_old, dW, dt):
+    def _local_error(self, y_new, y_old, dW, dt, t=0):
             #Ilie, Silvana, Kenneth R. Jackson, and Wayne H. Enright. 
             #"Adaptive time-stepping for the strong numerical solution of stochastic differential equations." 
             #Numerical Algorithms 68.4 (2015): 791-812.
             z = torch.normal(mean=0.0, std=1.0, size=dW.shape, device = self.device, dtype=self.dtype)*dt**0.5
             dW_1 = 0.5*dW + 0.5*z
             dW_2 = 0.5*dW - 0.5*z
-            ys_1 = self._step_forward_uncompiled(y_old, dW_1, dt/2)
-            ys_2 = self._step_forward_uncompiled(ys_1, dW_2, dt/2)
+            ys_1 = self._step_forward_uncompiled(y_old, dW_1, dt/2, t)
+            ys_2 = self._step_forward_uncompiled(ys_1, dW_2, dt/2, t)
             return (torch.abs(ys_2 - y_new).max()/self._tolerance)
         
     def set_stats(self, **kwargs):
@@ -196,11 +222,15 @@ class SDE:
             > info_rate = True/False, Calculate information rate. Keys: info_rate(t*), t*
             > info_rate_v = True/False, Calculate information rate of velocity. Keys: info_rate(t#), t#
             > position = True/False, store the trajectory of the SDE. Keys: y(t), t
-
+            
+            > collection_frequency: int, frequency with which stats are collected. Default 1 (every 1 timestep).
             Note that if large number of parallel simulations are run position can quickly fill up the RAM.
             """
         
-        all_stats = ['position', 'density', 'density_v', 'info_rate', 'mean', 'std', 'mean_v', 'std_v', 'entropy', 'entropy_v', 'info_rate_v']
+        all_stats = ['position', 'density', 'density_v', 'info_rate', 'mean', 'std', 'mean_v', 'std_v', 'entropy', 'entropy_v', 'info_rate_v', 'collection_frequency']
+        
+        ####Stat Variables##################
+        self.collection_frequency = kwargs.get('collection_frequency', 1)
         
         for i in kwargs.keys():
             if i not in all_stats: raise Exception(f"{i} argument not recognized.")
@@ -243,30 +273,61 @@ class SDE:
             If information rate of velocity is being measured, df is required. This will be fixed in the future.
         """
         self.fn = [f, g, df, dg, d2f, d2g]
-        
+        #In below code d variable used in lambda for compatibility with SDE_ND to pass time variable to step_forward function.
         if self.method == 'euler_maruyama':
-            self._step_forward_uncompiled = lambda a,b,c: self._euler_maruyama(a,b,c, self.fn)
+            self._step_forward_uncompiled = lambda a,b,c,d: self._euler_maruyama(a,b,c, self.fn) 
         elif self.method == 'milstein' and self._functions_compiled == False:
             if dg == None: print("Warning: Assuming derivative of diffusion is 0 throughout the domain")
-            self._step_forward_uncompiled = lambda a,b,c: self._milstein(a,b,c, self.fn)
+            self._step_forward_uncompiled = lambda a,b,c,d: self._milstein(a,b,c, self.fn)
         elif self.method == 'taylor_15':
             if self._functions_compiled == False:
                 if dg == None: print("Warning: Assuming derivative of diffusion is 0 throughout the domain")
                 if d2g == None: print("Warning: Assuming 2nd derivative of diffusion is 0 throughout the domain")
                 if df == None: print("Warning: Assuming derivative of drift is 0 throughout the domain")
                 if d2f == None: print("Warning: Assuming 2nd derivative of drift is 0 throughout the domain")
-            self._step_forward_uncompiled = lambda a,b,c: self._taylor_15(a,b,c, self.fn)
+            self._step_forward_uncompiled = lambda a,b,c,d: self._taylor_15(a,b,c, self.fn)
 
-        self.step_forward = torch.jit.trace(self._step_forward_uncompiled, (self.y_init, self.y_init, self.dt_init), check_trace=False)
+        self.step_forward = torch.jit.trace(self._step_forward_uncompiled, (self.y_init, self.y_init, self.dt_init, self.dt_init), check_trace=False)
         
-        if self.adaptive_stepping: self.step_error = torch.jit.trace(self._local_error, (self.y_init, self.y_init, self.y_init, self.dt_init), check_trace=False)
-        self.velocity = torch.jit.trace(self._velocity, (self.y_init, ), check_trace = False)
+        if self.adaptive_stepping: self.step_error = torch.jit.trace(self._local_error, (self.y_init, self.y_init, self.y_init, self.dt_init, self.dt_init), check_trace=False)
+        self.velocity = torch.jit.trace(self._velocity, (self.y_init, self.dt_init), check_trace = False)
         
         self._functions_compiled = True
+    
+    @torch.jit.script
+    def hist2D(y_x, y_y, bins_x: int, bins_y: int, density: bool = False):
+        '''Computes 2D histogram of joint probability.
+        
+           y_x: 1D tenosr, samples from x_axis.
+           y_y: 1d tensor, corresponding samples from y_axis.
+           bins_x: int, number of bins along x_axis.
+           bins_y: int, number of bins aling y_axis.
+           desnity: bool, True will return density rather than count.
+        '''
+        min_val_x = torch.min(y_x)
+        max_val_x = torch.max(y_x)
+        range_x = max_val_x-min_val_x
+        x = torch.linspace(min_val_x, max_val_x, bins_x+1, dtype=y_x.dtype)
+        x = (x[1:]+x[:-1])/2
+        
+        min_val_y = torch.min(y_y)
+        max_val_y = torch.max(y_y)
+        range_y = max_val_y-min_val_y
+        y = torch.linspace(min_val_y, max_val_y, bins_y+1, dtype=y_y.dtype)
+        y = (y[1:]+y[:-1])/2
+
+        flat_y = torch.floor((y_y-min_val_y)*(bins_y-1)/range_y)+(y_x-min_val_x)/range_x
+        hist = torch.histc(flat_y, min=0, max=bins_x, bins=int(bins_x*bins_y)).reshape((bins_y,bins_x))
+        
+        if density: hist /= (bins_x*bins_y*(x[1]-x[0])*(y[1]-y[0]))
+        return x, y, hist
         
     @torch.jit.script
     def info_rate(y_new, y_old, dt, bins: int = 0, gauss_estimate : bool = True):
-        """Compute information rate for 1D distribution from tensor of samples. If multi-d
+        """Compute information rate.
+           > 
+           
+           returns: (Sqrt approx, Symmetrized KL estimate, Gauss Approx (if gauss_estimate=True))
         """
         num_par = y_new.shape[-1]
         if bins==0: bins = int(1.4*2.59*num_par**0.33333)
@@ -330,7 +391,7 @@ class SDE:
 
     def _compute_info_rate_v(self, v_new, y, dt):
         if self.dt_elapsed_v == 0:
-            v = self.velocity(y)
+            v = self.velocity(y, self.t)
             self.t_old_v = self.t
             self.dt_old_v = dt
             self.v_old = v
@@ -341,11 +402,10 @@ class SDE:
         self.dt_elapsed_v += dt   
 
         new_std = self.data['std_v(t)'][-1] if self._calc_std_v else torch.std(v_new, unbiased = True)
-
         if self.dt_interp_v<self.dt_old_v:
             xi = torch.normal(mean=0.0, std=self.dt_interp_v**0.5, size=(self.num_par,), device = self.device, dtype=self.dtype)
-            y_interp = self.step_forward(y, xi, self.dt_interp_v)
-            v_interp = self.velocity(y_interp)
+            y_interp = self.step_forward(y, xi, self.dt_interp_v, self.t)
+            v_interp = self.velocity(y_interp, self.t)
             
             self.data['info_rate_v(t#)'].append(self.info_rate(v_interp, self.v_old, self.dt_interp_v, gauss_estimate = self.gauss_estimate))
             self.data['t#'].append(self.t_old_v + 0.5*self.dt_interp_v)
@@ -403,7 +463,7 @@ class SDE:
         
         if self.dt_interp<self.dt_old: #questionable step
             dW_interp = torch.normal(mean=0.0, std=torch.sqrt(self.dt_interp), size=(self.num_par,), device = self.device, dtype=self.dtype)
-            y_interp = self.step_forward(y, dW_interp, self.dt_interp)
+            y_interp = self.step_forward(y, dW_interp, self.dt_interp, self.t)
             self.data['info_rate(t*)'].append(self.info_rate(y_interp, y, self.dt_interp, gauss_estimate = self.gauss_estimate))
             self.data['t*'].append(self.t +0.5*self.dt_interp)
             
@@ -445,9 +505,12 @@ class SDE:
             self.dt_elapsed *= 0
     
     def _collect_stats(self, y_new, y, dt, init=False):
+        if init == False and self.i%self.collection_frequency != 0:
+            return
+    
         if self._compute_velocity:
-            xi = torch.normal(mean=0.0, std=1e-4, size=(self.num_par,), device = self.device, dtype=self.dtype)
-            v_new = self.velocity(y_new)
+            #xi = torch.normal(mean=0.0, std=1e-4, size=(self.num_par,), device = self.device, dtype=self.dtype)
+            v_new = self.velocity(y_new, self.t)
         
         if self._calc_position: self.data['y(t)'].append(y_new.to('cpu'))
         if self._calc_mean: self.data['mean(t)'].append(torch.mean(y_new, dim=-1))
@@ -478,7 +541,8 @@ class SDE:
             return
         
         if self._calc_info_rate: self._compute_info_rate(y_new, y, dt)  
-        if self._calc_info_rate_v: self._compute_info_rate_v(v_new, y, dt)
+        if self._calc_info_rate_v: 
+            self._compute_info_rate_v(v_new, y, dt)
                 
         self.data['t'].append(self.t + dt)
             
@@ -501,7 +565,7 @@ class SDE:
         self.t_end  = torch.tensor(t_end, dtype = self.dtype, device = self.device)  #final time
         
         print("Starting Simulation...")
-        self.accept, self.reject, i = 0, 0, -1
+        self.accept, self.reject, self.i = 0, 0, -1
         self.t = self.t_init
         dt = self.dt_init
         self.y_init = y = self._initialize_y(init_mean, init_std)
@@ -510,16 +574,16 @@ class SDE:
         
         t1 = time.perf_counter()
         while(self.t < self.t_end):
-            i+=1     
+            self.i+=1     
             ################# Milstein method #################
             dW = torch.normal(mean=0.0, std=torch.sqrt(dt), size=self.y_init.shape, device = self.device, dtype=self.dtype)
-            y_new = self.step_forward(y, dW, dt)
+            y_new = self.step_forward(y, dW, dt, self.t)
 
             if self.adaptive_stepping:
-                err = self.step_error(y_new, y, dW, dt)
+                err = self.step_error(y_new, y, dW, dt, self.t)
                 if err>=1:
                     self.reject+=1
-                    dt = dt*torch.clamp(torch.pow(self.fac/err, self._err_scale_exp), self.facmin, self.facmax) #1.5 for milstein methd
+                    dt = dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax) #1.5 for milstein methd
                     continue ###Discontinuing current iteration
 
             ########Compute Statistics##############################
@@ -529,10 +593,10 @@ class SDE:
             self.accept+=1
             self.t = self.t+dt
             
-            if self.adaptive_stepping: dt = dt*torch.clamp(torch.pow(self.fac/err, self._err_scale_exp), self.facmin, self.facmax)
+            if self.adaptive_stepping: dt = dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax)
 
             #updating progress bar
-            if self.debug == False and (i%20 == 0 or self.t >= self.t_end):
+            if self.debug == False and (self.i%20 == 0 or self.t >= self.t_end):
                 eta = (self.t_end - self.t)*(time.perf_counter() - t1)/(self.t - self.t_init)
                 print("<"+"="*int(self.t*50/(self.t_end - self.t_init)) + "_"*int(50*(1 - self.t/(self.t_end-  self.t_init)))+">"\
                      + " dt: " + f"{dt:.2e}" + f" acc: {self.accept} rej: {self.reject}"\
@@ -559,9 +623,9 @@ class SDE:
             2nd column calculated using symmetrized KL diveregence. 1st column using an approximation of this expression.
             If the attribute guass_estimate = True, 3rd column represents an approximation assuming gaussian distribution.
         """
-        parameters = {'t_init': self.t_init, 't_end': self.t_end, "dt_init": self.dt_init, "time_taken": self.t2-self.t1,
+        parameters = {'t_init': self.t_init.item(), 't_end': self.t_end.item(), "dt_init": self.dt_init.item(), "time_taken": self.t2-self.t1,
                       'num_par': self.num_par, "accepted": self.accept, "rejected": self.reject,
-                      'tolerance': self._tolerance, "fac": self.fac, "facmin": self.facmin, "facmax": self.facmax
+                      'tolerance': self._tolerance.item(), "fac": self._fac.item(), "facmin": self._facmin.item(), "facmax": self._facmax.item()
                       }
         self.data['parameters'] = parameters
         self._save_functions()
