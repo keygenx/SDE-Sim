@@ -297,7 +297,7 @@ class SDE:
     @torch.jit.script
     def hist2D(y_x, y_y, bins_x: int, bins_y: int, density: bool = False):
         '''Computes 2D histogram of joint probability.
-        
+
            y_x: 1D tenosr, samples from x_axis.
            y_y: 1d tensor, corresponding samples from y_axis.
            bins_x: int, number of bins along x_axis.
@@ -307,20 +307,23 @@ class SDE:
         min_val_x = torch.min(y_x)
         max_val_x = torch.max(y_x)
         range_x = max_val_x-min_val_x
-        x = torch.linspace(min_val_x, max_val_x, bins_x+1, dtype=y_x.dtype)
+        x = torch.linspace(min_val_x, max_val_x, bins_x+1, dtype=y_x.dtype, device=min_val_x.device)
         x = (x[1:]+x[:-1])/2
-        
+
         min_val_y = torch.min(y_y)
         max_val_y = torch.max(y_y)
         range_y = max_val_y-min_val_y
-        y = torch.linspace(min_val_y, max_val_y, bins_y+1, dtype=y_y.dtype)
+        y = torch.linspace(min_val_y, max_val_y, bins_y+1, dtype=y_y.dtype, device=min_val_y.device)
         y = (y[1:]+y[:-1])/2
 
-        flat_y = torch.floor((y_y-min_val_y)*(bins_y-1)/range_y)+(y_x-min_val_x)/range_x
-        hist = torch.histc(flat_y, min=0, max=bins_x, bins=int(bins_x*bins_y)).reshape((bins_y,bins_x))
-        
+        flat_y = torch.trunc((y_x-min_val_x)*(bins_x)/range_x)
+        flat_y[flat_y==bins_x] = bins_x-1 #taking care of point on the right edge of the final bin
+        flat_y += (y_y-min_val_y)/range_y
+
+        hist = torch.histc(flat_y, min=0, max=bins_x, bins=int(bins_x*bins_y)).reshape((bins_x,bins_y))
+
         if density: hist /= (bins_x*bins_y*(x[1]-x[0])*(y[1]-y[0]))
-        return x, y, hist
+        return x, y, hist.T
         
     @torch.jit.script
     def info_rate(y_new, y_old, dt, bins: int = 0, gauss_estimate : bool = True):
