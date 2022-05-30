@@ -81,6 +81,7 @@ class SDE:
         self._velocity_avg_dt = torch.tensor(1e-8, dtype = self.dtype, device = self.device)
         self._shape = (num_par, )
         self.fn_def_strings = ['f', 'g', 'df', 'dg', 'd2f', 'd2g']
+        self.initialized = False
 
 
         self.set_stats()
@@ -149,6 +150,17 @@ class SDE:
         if dg != None:
             terms += 0.5*g*dg(Y)*(dW**2 - dt)
         return terms
+        
+    @staticmethod
+    def _SRK_2(Y, dW, dt, fn):
+        
+        if callable(fn[0]): 
+            f_1 = fn[0](Y)
+        else: f = fn[0]
+        if callable(fn[1]): g = fn[1](Y)
+        else: g = fn[1]
+        ode_term = 1
+        pass
     
     @staticmethod
     def _euler_maruyama(Y, dW, dt, fn):
@@ -220,10 +232,12 @@ class SDE:
             > entropy = True/False, Calculate entropy. Keys: entropy(t), t
             > entropy_v = True/False, Calculate entropy of velocity. Keys: entropy_v(t), t
             > info_rate = True/False, Calculate information rate. Keys: info_rate(t*), t*
-            > info_rate_v = True/False, Calculate information rate of velocity. Keys: info_rate(t#), t#
+            > info_rate_v = True/False, Calculate information rate of velocity. Keys: info_rate_v(t#), t#
             > position = True/False, store the trajectory of the SDE. Keys: y(t), t
             
             > collection_frequency: int, frequency with which stats are collected. Default 1 (every 1 timestep).
+            
+            
             Note that if large number of parallel simulations are run position can quickly fill up the RAM.
             """
         
@@ -298,11 +312,13 @@ class SDE:
     def hist2D(y_x, y_y, bins_x: int, bins_y: int, density: bool = False):
         '''Computes 2D histogram of joint probability.
 
-           y_x: 1D tenosr, samples from x_axis.
-           y_y: 1d tensor, corresponding samples from y_axis.
-           bins_x: int, number of bins along x_axis.
-           bins_y: int, number of bins aling y_axis.
-           desnity: bool, True will return density rather than count.
+           > y_x: 1D tenosr, samples from x_axis.
+           > y_y: 1d tensor, corresponding samples from y_axis.
+           > bins_x: int, number of bins along x_axis.
+           > bins_y: int, number of bins aling y_axis.
+           > desnity: bool, True will return density rather than count.
+           
+           Doesn't yet work for Multi dimensional problem.
         '''
         min_val_x = torch.min(y_x)
         max_val_x = torch.max(y_x)
@@ -322,15 +338,47 @@ class SDE:
 
         hist = torch.histc(flat_y, min=0, max=bins_x, bins=int(bins_x*bins_y)).reshape((bins_x,bins_y))
 
-        if density: hist /= (bins_x*bins_y*(x[1]-x[0])*(y[1]-y[0]))
+        if density: 
+            hist /= (y_x.shape[-1]*(x[1]-x[0])*(y[1]-y[0]))
+            hist.nan_to_num(nan=0.0, posinf=float('inf'))
         return x, y, hist.T
+        
+    @torch.jit.script
+    def hist2D_diagonal(y_x, y_y, bins: int, density: bool = False):
+        '''Computes 2D histogram of joint probability.
+
+           y_x: 1D tenosr, samples from x_axis.
+           y_y: 1d tensor, corresponding samples from y_axis.
+           bins_x: int, number of bins along x_axis.
+           bins_y: int, number of bins aling y_axis.
+           desnity: bool, True will return density rather than count.
+           
+           Doesn't yet work for Multi dimensional problem.
+        '''
+        min_val_x = torch.min(y_x)
+        max_val_x = torch.max(y_x)
+        range_x = max_val_x-min_val_x
+        binsize = range_x/bins
+        x = torch.linspace(min_val_x, max_val_x, bins+1, dtype=y_x.dtype, device=min_val_x.device)
+        x = (x[1:]+x[:-1])/2
+
+        close_elements = torch.isclose(y_x, y_y, atol = binsize/2.0)
+        y_true = y_x[close_elements]
+        prob = histc(y_true, bins=bins, max=max_val_x, min =min_val_x)
+        if density: prob = torch.nan_to_num(prob/(y_true.shape[-1]*binsize), nan=0.0, posinf=float('inf'))
+        return x, prob
         
     @torch.jit.script
     def info_rate(y_new, y_old, dt, bins: int = 0, gauss_estimate : bool = True):
         """Compute information rate.
-           > 
+           > y_new: 1D/2D tenosr, new samples. For multi-dimensional case y_new has the shape (dims, samples)
+           > y_old: 1D/2D tensor, old samples. For multi-dimensional case y_old has the shape (dims, samples)
+           > bins_x: int, number of bins in the histogram. Default 0. If 0, bins = int(1.4*2.59*samples**0.33333).
+           > gauss_estimate: bool, if True will also return estimate assuming distribution is gaussian with mean and variance calculated from y_new and y_old.
            
            returns: (Sqrt approx, Symmetrized KL estimate, Gauss Approx (if gauss_estimate=True))
+           if y_new, y_old is 1D tensor, return tensor has shape (different estimates, )
+           if y_new, y_old is 2D tensor, return tensor has shape (dims, different estimates)
         """
         num_par = y_new.shape[-1]
         if bins==0: bins = int(1.4*2.59*num_par**0.33333)
@@ -361,6 +409,14 @@ class SDE:
 
     @torch.jit.script
     def histogram(item, bins: int = 0, density: bool = False):
+        """Compute histogram of item.
+           > item: 1D/2D tenosr, samples. For multi-dimensional case y_new has the shape (dims, samples)
+           > bins: int, number of bins in the histogram. Default 0. If 0, bins = int(1.4*2.59*samples**0.33333).
+           > desnity: bool, True will return density rather than count.
+           
+           returns: bin_centre, histogram
+        
+        """
         min_val = torch.min(item, dim=-1)[0]
         max_val = torch.max(item, dim=-1)[0]
         
@@ -377,7 +433,7 @@ class SDE:
             bin_edge  = min_val + torch.arange(bins+1, device=min_val.device, dtype=min_val.dtype)*dx
             bin_centre = (bin_edge[1:]+bin_edge[:-1])/2
             if density: prob = torch.nan_to_num(prob/(item.shape[-1]*dx), nan=0.0, posinf=float('inf'))
-            return prob, bin_centre
+            return bin_centre, prob
     
     @torch.jit.script
     def entropy(item, bins: int = 0):
@@ -456,13 +512,22 @@ class SDE:
             self.y_old = y
             self.y_next = y_new
             self.dt_old = dt
-            self.y_mean = self.data['mean(t)'][-2] if self._calc_mean else torch.mean(y)
-            self.y_std = self.data['std(t)'][-2] if self._calc_std else torch.std(y, unbiased = True)
-            self.dt_interp = self._mean_shift_threshold*self.y_std/torch.abs(self.fn[0](y).mean())
-
+            
+            #computing interpolation dt
+            y_subset = y[:1000] #only need to use a subset for approximate calculations of interpolation time.
+            self.y_mean = self.data['mean(t)'][-2] if self._calc_mean else torch.mean(y_subset)
+            self.y_std = self.data['std(t)'][-2] if self._calc_std else torch.std(y_subset, unbiased = True)
+            fy = self.fn[0](y_subset)
+            gy = self.fn[1](y_subset)
+            fy_mean = fy.mean()
+            mul_y_fy = ((y_subset-self.y_mean)*(fy-fy_mean))
+            dt_interp_mean = self._mean_shift_threshold*self.y_std/torch.abs(fy_mean)
+            dt_interp_std = self.y_std**2*torch.abs((1-0.9**2)/(2*mul_y_fy+gy**2).mean())
+            #self.dt_interp = self._mean_shift_threshold*self.y_std/torch.abs(self.fn[0](y[:1000]).mean())
+            self.dt_interp = torch.min(dt_interp_mean,dt_interp_std)
         self.dt_elapsed+=dt   
 
-        new_std = self.data['std(t)'][-1] if self._calc_std else torch.std(y_new, unbiased = True)
+        new_std = self.data['std(t)'][-1] if self._calc_std else torch.std(y_new[:1000], unbiased = True)
         
         if self.dt_interp<self.dt_old: #questionable step
             dW_interp = torch.normal(mean=0.0, std=torch.sqrt(self.dt_interp), size=(self.num_par,), device = self.device, dtype=self.dtype)
@@ -471,12 +536,12 @@ class SDE:
             self.data['t*'].append(self.t +0.5*self.dt_interp)
             
             if self.debug:
-                print(f"IR:Interp: time={self.t:.3e}, dt_interp={self.dt_interp:.3e}, mean_diff={torch.abs(torch.mean(y_interp)-self.y_mean):.3e}, std={self.y_std:.3e}")
+                print(f"IR:Interp: time={self.t:.3e}, dt_interp={self.dt_interp:.3e}, mean_diff/std={torch.abs(torch.mean(y_interp[:1000])-self.y_mean)/self.y_std:.3f}, std_ratio={self.y_std/torch.std(y_interp[:1000]):.3f}")
             
             self.dt_elapsed_thresh = self.dt_elapsed*1.2
             self.dt_elapsed *= 0
 
-        elif torch.abs(torch.mean(y_new)-self.y_mean) > self._mean_shift_threshold*self.y_std:
+        elif torch.abs(torch.mean(y_new[:1000])-self.y_mean) > self._mean_shift_threshold*self.y_std:
             #there will be a small loss of accuracy if the overlap is small
             self.data['info_rate(t*)'].append(self.info_rate(y_new, self.y_old, self.dt_elapsed, gauss_estimate = self.gauss_estimate))
             self.data['t*'].append(self.t_old + 0.5*self.dt_elapsed)
@@ -508,14 +573,14 @@ class SDE:
             self.dt_elapsed *= 0
     
     def _collect_stats(self, y_new, y, dt, init=False):
-        if init == False and self.i%self.collection_frequency != 0:
+        if self.i%self.collection_frequency != 0:
             return
     
         if self._compute_velocity:
             #xi = torch.normal(mean=0.0, std=1e-4, size=(self.num_par,), device = self.device, dtype=self.dtype)
             v_new = self.velocity(y_new, self.t)
         
-        if self._calc_position: self.data['y(t)'].append(y_new.to('cpu'))
+        if self._calc_position: self.data['y(t)'].append(y_new.to('cpu').numpy())
         if self._calc_mean: self.data['mean(t)'].append(torch.mean(y_new, dim=-1))
         if self._calc_std: self.data['std(t)'].append(torch.std(y_new, unbiased = True, dim=-1))
         if self._calc_mean_v: self.data['mean_v(t)'].append(torch.mean(v_new, dim=-1))
@@ -525,11 +590,11 @@ class SDE:
         if self._calc_entropy_v: self.data['entropy_v(t)'].append(self.entropy(v_new))
             
         if self._calc_density: 
-            prob_density, bin_centre = self.histogram(y_new, density=True)
+            bin_centre, prob_density = self.histogram(y_new, density=True)
             self.data['p(y,t)'].append(prob_density.to('cpu'))
             self.data['y'].append(bin_centre.to('cpu'))
         if self._calc_density_v: 
-            prob_density, bin_centre = self.histogram(v_new, density=True)
+            bin_centre, prob_density = self.histogram(v_new, density=True)
             self.data['p(v,t)'].append(prob_density.to('cpu')) #send to cpu. Can get too large for GPU
             self.data['v'].append(bin_centre.to('cpu'))
             
@@ -550,59 +615,106 @@ class SDE:
         self.data['t'].append(self.t + dt)
             
     def _initialize_y(self, init_mean, init_std):
+        if hasattr(init_mean, '__len__'):
+            if len(init_mean) == self.num_par:
+                return torch.tensor(init_mean, device = self.device, dtype = self.dtype)
+  
+            raise Exception(f"Invalid init_mean argument. Length doesn't match expected length")
         return torch.normal(mean = init_mean, std = init_std, size = self.y_init.shape, device = self.device,
                                        dtype = self.dtype)
 
-    def simulate(self, t_init : float, t_end : float, init_mean : float, init_std : float):
+
+    def initialize(self, t_init : float, t_end : float, init_mean, init_std : float = 0.0):
         """
         > t_init : float, inital time 
         > t_end : float, final time
         > init_mean : float, mean of initial distribution
         > init_std : float, standard deviation of initial distribution
         """
-
         self.data = defaultdict(list)
-        if self.debug == True: self.debug_output = []
         ######### physical parameters #############
         self.t_init = torch.tensor(t_init, dtype = self.dtype, device = self.device) #initial time
         self.t_end  = torch.tensor(t_end, dtype = self.dtype, device = self.device)  #final time
         
-        print("Starting Simulation...")
-        self.accept, self.reject, self.i = 0, 0, -1
+        self.accept, self.reject, self.i = 0, 0, 0
         self.t = self.t_init
-        dt = self.dt_init
-        self.y_init = y = self._initialize_y(init_mean, init_std)
+        self.dt = self.dt_init
+
+        self.y = self.y_init = self._initialize_y(init_mean, init_std)
         
-        self._collect_stats(y, y, dt, init=True)
-        
-        t1 = time.perf_counter()
-        while(self.t < self.t_end):
-            self.i+=1     
-            ################# Milstein method #################
-            dW = torch.normal(mean=0.0, std=torch.sqrt(dt), size=self.y_init.shape, device = self.device, dtype=self.dtype)
-            y_new = self.step_forward(y, dW, dt, self.t)
+        self._collect_stats(self.y_init, self.y_init, self.dt, init=True)
+        self.initialized = True
+
+    def step(self):
+        """
+        Takes one step. Use Initialize() before using step().
+        """
+        if not self.initialized:
+            raise Exception(f"Not initialized.")
+
+        while(True):
+            self.i += 1     
+            #################Taking a step#################
+            dW = torch.normal(mean=0.0, std=torch.sqrt(self.dt), size=self.y_init.shape, device = self.device, dtype=self.dtype)
+            y_new = self.step_forward(self.y, dW, self.dt, self.t)
 
             if self.adaptive_stepping:
-                err = self.step_error(y_new, y, dW, dt, self.t)
+                err = self.step_error(y_new, self.y, dW, self.dt, self.t)
                 if err>=1:
                     self.reject+=1
-                    dt = dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax) #1.5 for milstein methd
+                    self.dt = self.dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax) #1.5 for milstein methd
                     continue ###Discontinuing current iteration
 
             ########Compute Statistics##############################
-            self._collect_stats(y_new, y, dt)
+            self._collect_stats(y_new, self.y, self.dt)
 
-            y = y_new
-            self.accept+=1
-            self.t = self.t+dt
+            self.accept += 1
+            self.t, self.y = self.t + self.dt, y_new
             
-            if self.adaptive_stepping: dt = dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax)
+            if self.adaptive_stepping: self.dt = self.dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax)
+            #del dW, y_new, err
+            #return self.t, self.y
+            return
+
+    def simulate(self, t_init : float, t_end : float, init_mean, init_std : float = 0.0):
+        """
+        > t_init : float, inital time 
+        > t_end : float, final time
+        > init_mean : float, mean of initial distribution
+        > init_std : float, standard deviation of initial distribution
+        """
+        
+        self.initialize(t_init, t_end, init_mean, init_std)
+        
+        t1 = time.perf_counter()
+        print("Starting Simulation...")
+        while(self.t < self.t_end):
+            self.i += 1     
+            #################Taking a step#################
+            dW = torch.normal(mean=0.0, std=torch.sqrt(self.dt), size=self.y_init.shape, device = self.device, dtype=self.dtype)
+            y_new = self.step_forward(self.y, dW, self.dt, self.t)
+
+            if self.adaptive_stepping:
+                err = self.step_error(y_new, self.y, dW, self.dt, self.t)
+                if err>=1:
+                    self.reject+=1
+                    self.dt = self.dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax) #1.5 for milstein methd
+                    continue ###Discontinuing current iteration
+
+            ########Compute Statistics##############################
+            self._collect_stats(y_new, self.y, self.dt)
+
+            self.y = y_new
+            self.accept += 1
+            self.t = self.t + self.dt
+            
+            if self.adaptive_stepping: self.dt = self.dt*torch.clamp(torch.pow(self._fac/err, self._err_scale_exp), self._facmin, self._facmax)
 
             #updating progress bar
             if self.debug == False and (self.i%20 == 0 or self.t >= self.t_end):
                 eta = (self.t_end - self.t)*(time.perf_counter() - t1)/(self.t - self.t_init)
                 print("<"+"="*int(self.t*50/(self.t_end - self.t_init)) + "_"*int(50*(1 - self.t/(self.t_end-  self.t_init)))+">"\
-                     + " dt: " + f"{dt:.2e}" + f" acc: {self.accept} rej: {self.reject}"\
+                     + " dt: " + f"{self.dt:.2e}" + f" acc: {self.accept} rej: {self.reject}"\
                      + f" ETA: {eta:.0f}s" + ' '*10, end='\r')
         
         t2 = time.perf_counter()
@@ -610,7 +722,16 @@ class SDE:
         
         self.t1, self.t2 = t1, t2
         for item in self.data.keys():
+            if item == 'y(t)': continue #keep position data as a list. Operations use too much memory
             self.data[item] = torch.stack(self.data[item]).to('cpu').numpy()
+            
+            
+        parameters = {'t_init': self.t_init.item(), 't_end': self.t_end.item(), "dt_init": self.dt_init.item(), "time_taken": self.t2-self.t1,
+                      'num_par': self.num_par, "accepted": self.accept, "rejected": self.reject,
+                      'tolerance': self._tolerance.item(), "fac": self._fac.item(), "facmin": self._facmin.item(), "facmax": self._facmax.item()
+                      }
+        self.data['parameters'] = parameters
+        self._save_functions()
     
     def _save_functions(self):
         self.data['functions'] = {}
@@ -626,12 +747,7 @@ class SDE:
             2nd column calculated using symmetrized KL diveregence. 1st column using an approximation of this expression.
             If the attribute guass_estimate = True, 3rd column represents an approximation assuming gaussian distribution.
         """
-        parameters = {'t_init': self.t_init.item(), 't_end': self.t_end.item(), "dt_init": self.dt_init.item(), "time_taken": self.t2-self.t1,
-                      'num_par': self.num_par, "accepted": self.accept, "rejected": self.reject,
-                      'tolerance': self._tolerance.item(), "fac": self._fac.item(), "facmin": self._facmin.item(), "facmax": self._facmax.item()
-                      }
-        self.data['parameters'] = parameters
-        self._save_functions()
+        
         Path(output_directory).mkdir(parents=True, exist_ok=True)
         file_path = os.path.join(output_directory,filename)
         with open(file_path, 'wb') as f:
