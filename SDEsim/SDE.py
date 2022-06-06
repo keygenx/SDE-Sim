@@ -547,7 +547,7 @@ class SDE:
             self.data['t*'].append(self.t_old + 0.5*self.dt_elapsed)
             
             if self.debug:
-                print(f"IR:Mean: time={self.t:.3e}, dt_elapsed={self.dt_elapsed:.3e}, mean_diff={torch.abs(torch.mean(y_new)-self.y_mean):.3e}, std={self.y_std:.3e}, mean={self.y_mean:.3e}")
+                print(f"IR:Mean: time={self.t:.3e}, dt_elapsed={self.dt_elapsed:.3e}, mean_diff={torch.abs(torch.mean(y_new[:1000])-self.y_mean):.3e}, std={self.y_std:.3e}, mean={self.y_mean:.3e}")
                 
             self.dt_elapsed_thresh = self.dt_elapsed*1.2
             self.dt_elapsed *= 0
@@ -564,7 +564,7 @@ class SDE:
 
         elif self.dt_elapsed_thresh < self.dt_elapsed:
             if self.debug:
-                print(f"IR:Iter: time={self.t:.3e}, dt_elapsed={self.dt_elapsed:.3e}, dt_thres={self.dt_elapsed_thresh:.3e}, std={self.y_std:.3e}, mean={self.y_mean:.3e}")
+                print(f"IR:Iter: time={self.t:.3e}, dt_elapsed={self.dt_elapsed:.3e}, dt_thres={self.dt_elapsed_thresh:.3e}, mean_diff={(torch.mean(y_new[:1000])-self.y_mean):.3e}, std_old:std_new={self.y_std/new_std:.3e}, std={self.y_std:.3e}, mean={self.y_mean:.3e}")
                 
             self.data['info_rate(t*)'].append(self.info_rate(y_new, self.y_old, self.dt_elapsed, gauss_estimate = self.gauss_estimate))
             self.data['t*'].append(self.t_old + 0.5*self.dt_elapsed)

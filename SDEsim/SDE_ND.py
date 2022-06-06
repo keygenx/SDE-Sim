@@ -72,6 +72,8 @@ class SDE_ND(SDE):
         for i in range(self.dims):
             fn_set = self.get_fn_set(i, 'ys_1_\\1', new_t = '(t+dt/2)')
             str_fn += f"\n  ys_2_{i} = self._step_fn(ys_1_{i}, dW_2_{i}, dt/2, ({fn_set}))"
+        #str_fn += "\n  print('Sub:', (torch.abs(ys_2_0 - y_new[0]).max()/self._tolerance), (torch.abs(ys_2_1 - y_new[1]).max()/self._tolerance), (torch.abs(ys_2_2 - y_new[2]).max()/self._tolerance).item())"
+        #str_fn += "\n  print('Tot: ', ((((ys_2_0 - y_new[0])**2 + (ys_2_1 - y_new[1])**2 + (ys_2_2 - y_new[2])**2)**0.5).max()/self._tolerance).item())"
         str_fn += "\n  return ((" + " + ".join([f"(ys_2_{i} - y_new[{i}])**2" for i in range(self.dims)]) + ")**0.5).max()/self._tolerance"
         str_fn += f"\nfunc2.__module__ = 'runtime_defined'"
         str_fn += "\nself.step_error_uncompiled = func2"
