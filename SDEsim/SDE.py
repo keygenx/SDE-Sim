@@ -721,10 +721,7 @@ class SDE:
         print(f"\nSimulation Finished: {t2-t1:.2f}s")
         
         self.t1, self.t2 = t1, t2
-        for item in self.data.keys():
-            if item == 'y(t)': continue #keep position data as a list. Operations use too much memory
-            self.data[item] = torch.stack(self.data[item]).to('cpu').numpy()
-            
+        
             
         parameters = {'t_init': self.t_init.item(), 't_end': self.t_end.item(), "dt_init": self.dt_init.item(), "time_taken": self.t2-self.t1,
                       'num_par': self.num_par, "accepted": self.accept, "rejected": self.reject,
@@ -750,6 +747,12 @@ class SDE:
         
         Path(output_directory).mkdir(parents=True, exist_ok=True)
         file_path = os.path.join(output_directory,filename)
+        
+        #Converting all the lists into numpy arrays.
+        for item in self.data.keys():
+            if item == 'y(t)': continue #keep position data as a list. Operations use too much memory
+            self.data[item] = torch.stack(self.data[item]).to('cpu').numpy()
+            
         with open(file_path, 'wb') as f:
             pickle.dump(dict(self.data), f) #dict() convert defaultdict to dict
             print(f"Output: {file_path}, Size: {os.path.getsize(file_path)/1024**2 :3f} MB")
