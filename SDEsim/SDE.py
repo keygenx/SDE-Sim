@@ -394,8 +394,6 @@ class SDE:
         prob_new = histc(y_new, bins=bins, max=max_val, min=min_val)/num_par
         ir_approx = 4*((prob_old**0.5-prob_new**0.5)**2).sum(dim=-1)
 
-        index = (prob_new-prob_old)*(prob_new!=0)*(prob_old!=0) #removing zeros with nansum in next line
-        kl_symm = (index*(torch.log(prob_new)-torch.log(prob_old))).nansum(dim=-1)
     
         if gauss_estimate:
             var_new = torch.var(y_new, unbiased = True, dim=-1)
@@ -403,9 +401,9 @@ class SDE:
             mean_new = torch.mean(y_new, dim=-1)
             mean_old = torch.mean(y_old, dim=-1)
             info_rate_normal = (var_new+(mean_new-mean_old)**2)/(var_old*2)+(var_old+(mean_new-mean_old)**2)/(var_new*2)-1
-            return torch.stack((ir_approx, kl_symm, info_rate_normal), dim=-1)**0.5/dt
+            return torch.stack((ir_approx, info_rate_normal), dim=-1)**0.5/dt
         else:
-            return torch.stack((ir_approx, kl_symm), dim=-1)**0.5/dt
+            return torch.stack((ir_approx, ), dim=-1)**0.5/dt
 
     @torch.jit.script
     def histogram(item, bins: int = 0, density: bool = False):
@@ -428,7 +426,7 @@ class SDE:
             bin_edge  = min_val[:,None] + torch.arange(bins+1, device=min_val.device, dtype=min_val.dtype)[None,:]*dx[:,None]
             bin_centre = (bin_edge[:,1:]+bin_edge[:,:-1])/2
             if density: prob = torch.nan_to_num(prob/(item.shape[-1]*dx[:, None]), nan=0.0, posinf=float('inf'))
-            return prob, bin_centre
+            return bin_centre, prob
         else:
             bin_edge  = min_val + torch.arange(bins+1, device=min_val.device, dtype=min_val.dtype)*dx
             bin_centre = (bin_edge[1:]+bin_edge[:-1])/2
